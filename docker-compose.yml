@@ -1,0 +1,27 @@
+# agentx — long-running agent for consumer Microsoft accounts (outlook.com).
+# Talks to Microsoft Graph directly via MSAL; no sidecar.
+#
+# Fill CLIENT_ID / CLIENT_SECRET / SESSION_SECRET in .env.
+
+services:
+  agent:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      AGENT_CLIENT_ID: ${CLIENT_ID}
+      AGENT_CLIENT_SECRET: ${CLIENT_SECRET}
+      AGENT_AUTHORITY: ${AUTHORITY:-https://login.microsoftonline.com/consumers}
+      AGENT_REDIRECT_URI: ${REDIRECT_URI:-http://localhost:8080/auth/callback}
+      AGENT_SESSION_SECRET: ${SESSION_SECRET}
+      AGENT_DB_PATH: /data/tasks.db
+      AGENT_OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      AGENT_OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      AGENT_OLLAMA_CONCURRENCY: ${OLLAMA_CONCURRENCY:-4}
+      AGENT_MAX_MESSAGES_PER_AUDIT: ${MAX_MESSAGES_PER_AUDIT:-200}
+      AGENT_BLOCKED_DOMAINS: ${BLOCKED_DOMAINS:-}
+    volumes:
+      - agent-data:/data
+
+volumes:
+  agent-data:

@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}agentx{% endblock %}</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+
+  {% block head %}{% endblock %}
+  <style>
+    :root {
+      --bg: #0c0d10;
+      --surface: #15171c;
+      --surface-2: #1d1f26;
+      --border: #25272f;
+      --border-strong: #383b46;
+      --text: #eef0f3;
+      --text-muted: #8a8f9c;
+      --text-faint: #5a5e6a;
+      --accent: #f0b842;
+      --accent-hi: #ffc955;
+      --accent-tint: rgba(240, 184, 66, .12);
+      --spam: #e8624a;
+      --spam-tint: rgba(232, 98, 74, .14);
+      --ham: #6dab59;
+      --ham-tint: rgba(109, 171, 89, .12);
+      --unknown: #6c7080;
+      --danger: #d04030;
+      --radius: 4px;
+      --serif: "Fraunces", "Times New Roman", serif;
+      --sans: "Geist", -apple-system, BlinkMacSystemFont, sans-serif;
+      --mono: "Geist Mono", "JetBrains Mono", "Menlo", monospace;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f4f1e8;
+        --surface: #fbf9f1;
+        --surface-2: #ece8d8;
+        --border: #d6d1bd;
+        --border-strong: #a8a28a;
+        --text: #181818;
+        --text-muted: #5d5e62;
+        --text-faint: #8d8d8d;
+        --accent: #b88a1f;
+        --accent-hi: #936c0e;
+        --accent-tint: rgba(184, 138, 31, .12);
+        --spam: #b73f25;
+        --spam-tint: rgba(183, 63, 37, .08);
+        --ham: #436e2c;
+        --ham-tint: rgba(67, 110, 44, .08);
+        --unknown: #76787f;
+        --danger: #a82815;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { margin: 0; padding: 0; }
+
+    body {
+      background:
+        radial-gradient(ellipse 80% 60% at 100% 0%, var(--accent-tint), transparent 60%),
+        radial-gradient(ellipse 80% 60% at 0% 100%, var(--spam-tint), transparent 50%),
+        var(--bg);
+      background-attachment: fixed;
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.55;
+      font-feature-settings: "ss01", "cv11";
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+    }
+
+    .layout {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1.25rem 1.75rem 5rem;
+    }
+
+    /* ───────── nav ───────── */
+    nav.app-nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem 0 1.25rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 2rem;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      text-decoration: none;
+      color: inherit;
+      border: none;
+    }
+
+    .brand-mark {
+      width: 16px;
+      height: 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .brand-mark span {
+      height: 2px;
+      background: var(--text-muted);
+      border-radius: 1px;
+      transition: width .3s, background .3s;
+    }
+    .brand-mark span:nth-child(1) { width: 100%; background: var(--accent); }
+    .brand-mark span:nth-child(2) { width: 60%; }
+    .brand-mark span:nth-child(3) { width: 90%; background: var(--accent); }
+    .brand-mark span:nth-child(4) { width: 35%; }
+
+    .brand:hover .brand-mark span:nth-child(2) { width: 80%; }
+    .brand:hover .brand-mark span:nth-child(4) { width: 60%; }
+
+    .brand-name {
+      font-family: var(--serif);
+      font-size: 1.2rem;
+      font-weight: 500;
+      letter-spacing: -0.02em;
+      font-variation-settings: "opsz" 60;
+    }
+    .brand-name em {
+      font-style: italic;
+      font-weight: 400;
+      color: var(--accent);
+      font-variation-settings: "opsz" 144;
+    }
+
+    .nav-meta {
+      display: flex;
+      gap: .9rem;
+      align-items: center;
+      font-family: var(--mono);
+      font-size: .76rem;
+      color: var(--text-muted);
+      letter-spacing: -0.01em;
+    }
+
+    /* ───────── typography ───────── */
+    h1, h2, h3 {
+      font-family: var(--serif);
+      font-weight: 500;
+      letter-spacing: -0.022em;
+      margin: 0 0 .8rem;
+      color: var(--text);
+    }
+    h1 {
+      font-size: clamp(1.7rem, 3vw + 1rem, 2.4rem);
+      font-variation-settings: "opsz" 144, "wght" 500;
+      letter-spacing: -0.03em;
+      line-height: 1.05;
+    }
+    h1 em { font-style: italic; color: var(--accent); font-weight: 400; }
+    h2 { font-size: 1.25rem; font-variation-settings: "opsz" 60; }
+
+    p { margin: 0 0 1rem; }
+
+    .eyebrow {
+      font-family: var(--mono);
+      font-size: .68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-faint);
+      margin-bottom: .35rem;
+    }
+
+    code, .mono {
+      font-family: var(--mono);
+      font-feature-settings: "calt" 0, "ss01";
+    }
+
+    .meta {
+      color: var(--text-muted);
+      font-size: .82rem;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid transparent;
+      transition: border-color .15s, color .15s;
+    }
+    a:hover { border-bottom-color: var(--accent); }
+    a.plain { color: inherit; }
+    a.plain:hover { color: var(--accent); border-color: transparent; }
+
+    /* ───────── buttons ───────── */
+    button, .button {
+      font-family: var(--sans);
+      font-size: .82rem;
+      font-weight: 500;
+      letter-spacing: -0.005em;
+      padding: .55rem 1.05rem;
+      border: 1px solid var(--border-strong);
+      background: var(--surface);
+      color: var(--text);
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: border-color .15s, background .15s, color .15s, transform .08s;
+    }
+    button:hover, .button:hover { border-color: var(--text); background: var(--surface-2); }
+    button:active { transform: translateY(1px); }
+
+    button.primary {
+      background: var(--accent);
+      color: #14110a;
+      border-color: var(--accent);
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    button.primary:hover {
+      background: var(--accent-hi);
+      border-color: var(--accent-hi);
+      color: #14110a;
+    }
+
+    button.danger {
+      border-color: rgba(208, 64, 48, .35);
+      color: var(--danger);
+      background: transparent;
+    }
+    button.danger:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
+
+    button.small {
+      font-size: .68rem;
+      padding: .26rem .55rem;
+      letter-spacing: 0;
+      white-space: nowrap;
+      border-radius: 3px;
+    }
+    button.small.danger { border-color: rgba(208, 64, 48, .28); }
+    button.small.danger:hover { border-color: var(--danger); }
+
+    form.inline { display: inline; margin: 0; }
+
+    /* ───────── containers ───────── */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem 1.5rem;
+    }
+    .panel.flush { padding: 0; overflow: hidden; }
+
+    .page-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 1.5rem;
+      margin: .5rem 0 1.25rem;
+      flex-wrap: wrap;
+    }
+    .page-head .actions { display: flex; gap: .5rem; align-items: center; }
+
+    /* ───────── pills ───────── */
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      font-family: var(--mono);
+      font-size: .68rem;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: .25rem .55rem;
+      border-radius: 99px;
+      border: 1px solid;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+    .pill::before {
+      content: "";
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .pill.spam       { color: var(--spam); border-color: var(--spam); background: var(--spam-tint); }
+    .pill.spam::before { background: var(--spam); box-shadow: 0 0 6px var(--spam); }
+    .pill.ham        { color: var(--ham); border-color: var(--ham); background: var(--ham-tint); }
+    .pill.ham::before { background: var(--ham); }
+    .pill.unknown    { color: var(--unknown); border-color: var(--border-strong); }
+    .pill.unknown::before { background: var(--unknown); }
+    .pill.queued     { color: var(--text-muted); border-color: var(--border-strong); }
+    .pill.queued::before { background: var(--text-muted); animation: pulse 2s infinite; }
+    .pill.processing { color: var(--accent); border-color: var(--accent); background: var(--accent-tint); }
+    .pill.processing::before { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse 1s infinite; }
+    .pill.completed  { color: var(--ham); border-color: var(--ham); background: var(--ham-tint); }
+    .pill.completed::before  { background: var(--ham); }
+    .pill.failed     { color: var(--spam); border-color: var(--spam); background: var(--spam-tint); }
+    .pill.failed::before { background: var(--spam); }
+    .pill.muted      { color: var(--text-faint); border-color: var(--border); }
+    .pill.muted::before { background: var(--text-faint); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    /* ───────── tables ───────── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .87rem;
+    }
+    th {
+      font-family: var(--mono);
+      font-weight: 500;
+      font-size: .66rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-faint);
+      padding: .8rem 1rem;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+    }
+    td {
+      padding: .85rem 1rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr { transition: background .15s; }
+    tbody tr:hover { background: rgba(255,255,255,0.018); }
+    @media (prefers-color-scheme: light) {
+      tbody tr:hover { background: rgba(0,0,0,0.02); }
+    }
+    tr.deleted-row td { opacity: .42; }
+
+    /* ───────── stats ───────── */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      gap: 1px;
+      overflow: hidden;
+      margin: 1.5rem 0 1rem;
+    }
+    .stat { background: var(--surface); padding: 1.1rem 1.25rem; }
+    .stat-label {
+      font-family: var(--mono);
+      font-size: .66rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-faint);
+      margin-bottom: .4rem;
+    }
+    .stat-value {
+      font-family: var(--serif);
+      font-size: clamp(1.6rem, 2.5vw + .8rem, 2.1rem);
+      font-variation-settings: "opsz" 144;
+      font-weight: 500;
+      letter-spacing: -0.025em;
+      line-height: 1;
+    }
+    .stat-value.accent { color: var(--accent); }
+    .stat-value.spam { color: var(--spam); }
+    .stat-value.muted { color: var(--text-muted); }
+
+    /* ───────── misc ───────── */
+    .empty {
+      padding: 3.5rem 1rem;
+      text-align: center;
+      color: var(--text-faint);
+      font-family: var(--serif);
+      font-style: italic;
+      font-size: 1.05rem;
+      font-variation-settings: "opsz" 60;
+    }
+
+    .row-actions {
+      display: flex;
+      gap: .3rem;
+      flex-wrap: nowrap;
+      justify-content: flex-end;
+      align-items: center;
+    }
+
+    pre.box {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+      overflow-x: auto;
+      font-size: .78rem;
+      font-family: var(--mono);
+      margin: .5rem 0 0;
+    }
+
+    details > summary {
+      cursor: pointer;
+      list-style: none;
+      font-family: var(--mono);
+      font-size: .72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      padding: .3rem 0;
+    }
+    details > summary::-webkit-details-marker { display: none; }
+    details > summary::before {
+      content: "▸";
+      display: inline-block;
+      margin-right: .35rem;
+      transition: transform .2s;
+    }
+    details[open] > summary::before { transform: rotate(90deg); }
+
+    /* ───────── modal ───────── */
+    dialog.modal {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      padding: 0;
+      max-width: 460px;
+      width: calc(100% - 2rem);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .45),
+                  0 0 0 1px var(--border) inset;
+      font-family: var(--sans);
+    }
+    dialog.modal::backdrop {
+      background: rgba(8, 9, 11, .55);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
+    }
+    @media (prefers-color-scheme: light) {
+      dialog.modal::backdrop { background: rgba(40, 35, 18, .35); }
+    }
+    dialog.modal[open] { animation: modal-in .18s cubic-bezier(.2,.8,.3,1); }
+    dialog.modal[open]::backdrop { animation: backdrop-in .18s ease-out; }
+    @keyframes modal-in {
+      from { transform: translateY(8px) scale(.98); opacity: 0; }
+      to   { transform: translateY(0) scale(1);     opacity: 1; }
+    }
+    @keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+
+    .modal-inner {
+      padding: 1.4rem 1.5rem 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: .9rem;
+      margin: 0;
+    }
+    .modal-inner .eyebrow { margin: 0; }
+    .modal-inner h3 {
+      font-family: var(--serif);
+      font-variation-settings: "opsz" 60;
+      font-size: 1.15rem;
+      letter-spacing: -0.02em;
+      margin: 0;
+      line-height: 1.3;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: .5rem;
+      margin-top: .5rem;
+    }
+    .modal-actions button { padding: .55rem 1rem; }
+    .modal-actions .primary { min-width: 110px; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <nav class="app-nav">
+      <a class="brand" href="/">
+        <span class="brand-mark"><span></span><span></span><span></span><span></span></span>
+        <span class="brand-name">agent<em>x</em></span>
+      </a>
+      {% if username %}
+        <div class="nav-meta">
+          <span>{{ username }}</span>
+          <form action="/auth/logout" method="post" class="inline">
+            <button type="submit" class="small">sign out</button>
+          </form>
+        </div>
+      {% endif %}
+    </nav>
+    {% block body %}{% endblock %}
+  </div>
+
+  <dialog id="confirm-dialog" class="modal" aria-labelledby="confirm-title">
+    <form method="dialog" class="modal-inner">
+      <div class="eyebrow">confirm</div>
+      <h3 id="confirm-title"></h3>
+      <div class="modal-actions">
+        <button value="cancel" type="submit">Cancel</button>
+        <button value="confirm" type="submit" class="primary" id="confirm-action">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    (() => {
+      const dialog = document.getElementById('confirm-dialog');
+      const titleEl = document.getElementById('confirm-title');
+      const actionBtn = document.getElementById('confirm-action');
+      let pendingForm = null;
+
+      document.addEventListener('submit', (e) => {
+        const form = e.target;
+        if (!(form instanceof HTMLFormElement)) return;
+        if (!form.dataset.confirm) return;
+        if (form.dataset.confirmed === 'true') return;
+        e.preventDefault();
+        pendingForm = form;
+        titleEl.textContent = form.dataset.confirm;
+        actionBtn.textContent = form.dataset.confirmAction || 'Continue';
+        dialog.showModal();
+      });
+
+      dialog.addEventListener('close', () => {
+        if (dialog.returnValue === 'confirm' && pendingForm) {
+          pendingForm.dataset.confirmed = 'true';
+          pendingForm.submit();
+        }
+        pendingForm = null;
+        dialog.returnValue = '';
+      });
+    })();
+  </script>
+</body>
+</html>

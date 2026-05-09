@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}agentx — sign in{% endblock %}
+{% block body %}
+  <div class="login">
+    <div class="eyebrow">authentication required</div>
+    <h1>An audit instrument for your <em>outlook.com</em> inbox.</h1>
+
+    <p class="lede">
+      <span class="mono">agentx</span> classifies recent mail with a local Ollama model,
+      auto-deletes from blocked sender domains, follows <code>List-Unsubscribe</code> headers,
+      and presents the lot as a queryable audit. Long-running, single-tenant, on your own infrastructure.
+    </p>
+
+    <a href="/auth/login" class="cta-link">
+      <button class="primary" type="button">Sign in with Microsoft &nbsp;→</button>
+    </a>
+
+    <div class="trust">
+      <div class="eyebrow">scope requested</div>
+      <div class="scopes">
+        <code class="scope">Mail.ReadWrite</code>
+        <code class="scope">offline_access</code>
+      </div>
+      <p class="meta scope-note">
+        <code>Mail.ReadWrite</code> is required to move messages to <em>Deleted Items</em> when you
+        click delete. The agent never sends mail. Tokens are stored locally.
+      </p>
+    </div>
+  </div>
+
+  <style>
+    .login {
+      max-width: 620px;
+      margin: 4rem auto;
+      padding: 1rem;
+    }
+    .login h1 { margin-bottom: 1.25rem; }
+    .lede {
+      font-size: 1rem;
+      line-height: 1.7;
+      color: var(--text);
+      max-width: 52ch;
+      margin: 0 0 2rem;
+    }
+    .lede .mono { color: var(--accent); }
+    .lede code {
+      background: var(--surface-2);
+      padding: .05rem .35rem;
+      border-radius: 3px;
+      font-size: .85em;
+    }
+    .cta-link { border: none; }
+    .cta-link:hover { border: none; }
+    .trust {
+      margin-top: 3.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+    .scopes { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .9rem; }
+    .scope {
+      display: inline-block;
+      padding: .3rem .65rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: .78rem;
+      color: var(--text-muted);
+    }
+    .scope-note { max-width: 56ch; }
+    .scope-note em { font-family: var(--serif); font-style: italic; color: var(--text); }
+  </style>
+{% endblock %}

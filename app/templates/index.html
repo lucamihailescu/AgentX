@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}agentx — audits{% endblock %}
+{% block body %}
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">queue · {{ tasks|length }} record{% if tasks|length != 1 %}s{% endif %}</div>
+      <h1>Mailbox <em>audits</em>.</h1>
+    </div>
+    <div class="actions">
+      <form action="/ui/tasks" method="post" class="inline">
+        <button type="submit" class="primary">+ Generate new audit</button>
+      </form>
+    </div>
+  </div>
+
+  {% if tasks %}
+    <div class="panel flush">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 110px">id</th>
+            <th style="width: 140px">status</th>
+            <th>created</th>
+            <th style="text-align: right">&nbsp;</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in tasks %}
+            <tr>
+              <td><code><a class="plain" href="/ui/tasks/{{ t.task_id }}">{{ t.task_id[:8] }}</a></code></td>
+              <td><span class="pill {{ t.status }}">{{ t.status }}</span></td>
+              <td class="meta mono" style="font-size: .78rem">{{ t.created_at }}</td>
+              <td style="text-align: right"><a href="/ui/tasks/{{ t.task_id }}">open →</a></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="panel">
+      <div class="empty">No audits yet — generate one to begin.</div>
+    </div>
+  {% endif %}
+{% endblock %}

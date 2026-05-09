@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}agentx — audit {{ task.task_id[:8] }}{% endblock %}
+{% block head %}
+  {% if task.status in ("queued", "processing") %}
+    <meta http-equiv="refresh" content="2">
+  {% endif %}
+{% endblock %}
+{% block body %}
+  <div class="page-head">
+    <div>
+      <div class="eyebrow"><a class="plain" href="/">← all audits</a></div>
+      <h1>Audit <span class="taskid">{{ task.task_id[:8] }}</span>.</h1>
+    </div>
+    <div class="actions">
+      <span class="pill {{ task.status }}">{{ task.status }}</span>
+    </div>
+  </div>
+
+  <p class="meta timeline">
+    <span class="eyebrow inline">created</span>&nbsp;{{ task.created_at }}
+    &nbsp;·&nbsp;
+    <span class="eyebrow inline">updated</span>&nbsp;{{ task.updated_at }}
+    {% if task.status in ("queued", "processing") %}
+      &nbsp;·&nbsp; <span class="ar">auto-refreshing every 2s</span>
+    {% endif %}
+  </p>
+
+  {% if task.error %}
+    <div class="panel error">
+      <div class="eyebrow" style="color: var(--spam)">error</div>
+      <pre class="errmsg">{{ task.error }}</pre>
+    </div>
+  {% endif %}
+
+  {% if task.result %}
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Messages</div>
+        <div class="stat-value">{{ task.result.message_count }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Flagged spam</div>
+        <div class="stat-value spam">{{ task.result.spam_count }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Auto-deleted</div>
+        <div class="stat-value accent">{{ task.result.auto_deleted_count or 0 }}</div>
+      </div>
+      {% if task.result.unknown_count %}
+        <div class="stat">
+          <div class="stat-label">Unclassified</div>
+          <div class="stat-value muted">{{ task.result.unknown_count }}</div>
+        </div>
+      {% endif %}
+    </div>
+
+    <p class="meta" style="margin: 0 0 1.5rem">
+      <span class="eyebrow inline">generated</span>&nbsp;{{ task.result.generated_at }}
+    </p>
+
+    {% if task.result.messages %}
+      <div class="panel flush">
+        <table class="audit-table">
+          <thead>
+            <tr>
+              <th style="width: 110px">verdict</th>
+              <th style="width: 200px">from</th>
+              <th>subject</th>
+              <th style="width: 140px">received</th>
+              <th style="width: 220px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in task.result.messages %}
+              <tr {% if m.deleted or m.auto_deleted %}class="deleted-row"{% endif %}>
+                <td>
+                  {% if m.auto_deleted %}
+                    <span class="pill muted">auto-deleted</span>
+                  {% elif m.deleted and m.unsubscribed %}
+                    <span class="pill muted">unsub + del</span>
+                  {% elif m.deleted %}
+                    <span class="pill muted">deleted</span>
+                  {% elif m.unsubscribed %}
+                    <span class="pill muted">unsubscribed</span>
+                  {% elif m.spam == true %}
+                    <span class="pill spam">spam</span>
+                  {% elif m.spam == false %}
+                    <span class="pill ham">ok</span>
+                  {% else %}
+                    <span class="pill unknown">?</span>
+                  {% endif %}
+                  {% if m.confidence is not none and not m.deleted and not m.unsubscribed and not m.auto_deleted %}
+                    <div class="conf">{{ '%.0f'|format(m.confidence * 100) }}% conf</div>
+                  {% endif %}
+                </td>
+                <td><code class="from">{{ m.from or '—' }}</code></td>
+                <td class="subject">
+                  <div class="subject-line">{{ m.subject or '(no subject)' }}</div>
+                  {% if m.reason %}<div class="reason">{{ m.reason }}</div>{% endif %}
+                </td>
+                <td class="meta received">{{ m.received or '' }}</td>
+                <td>
+                  {% if m.spam == true and not m.deleted and not m.auto_deleted and m.id %}
+                    <div class="row-actions">
+                      {% if m.unsubscribe_url and not m.unsubscribed %}
+                        <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/unsubscribe"
+                              method="post" class="inline"
+                              data-confirm="Hit the unsubscribe link for this sender?"
+                              data-confirm-action="Unsubscribe">
+                          <button type="submit" class="small">unsub</button>
+                        </form>
+                        <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/unsubscribe-and-delete"
+                              method="post" class="inline"
+                              data-confirm="Unsubscribe and move to Deleted Items?"
+                              data-confirm-action="Unsubscribe + delete">
+                          <button type="submit" class="small danger">unsub + del</button>
+                        </form>
+                      {% endif %}
+                      <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/delete"
+                            method="post" class="inline"
+                            data-confirm="Move this spam message to Deleted Items?"
+                            data-confirm-action="Delete">
+                        <button type="submit" class="small danger">delete</button>
+                      </form>
+                    </div>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    <details class="raw">
+      <summary>raw json</summary>
+      <pre class="box">{{ raw_json }}</pre>
+    </details>
+  {% endif %}
+
+  <style>
+    .taskid {
+      font-family: var(--mono);
+      font-size: .55em;
+      letter-spacing: 0;
+      color: var(--text-muted);
+      vertical-align: middle;
+      margin-left: .35rem;
+      padding: .25rem .5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .timeline { font-size: .8rem; margin-bottom: .5rem; }
+    .timeline .eyebrow.inline {
+      display: inline;
+      margin: 0;
+      color: var(--text-faint);
+    }
+    .timeline .ar { color: var(--accent); }
+
+    .panel.error {
+      border-color: var(--spam);
+      background: var(--spam-tint);
+      margin: 1.5rem 0;
+    }
+    .errmsg {
+      margin: 0;
+      white-space: pre-wrap;
+      font-family: var(--mono);
+      font-size: .82rem;
+      color: var(--text);
+    }
+
+    .conf {
+      font-family: var(--mono);
+      font-size: .68rem;
+      color: var(--text-faint);
+      margin-top: .35rem;
+      letter-spacing: 0.04em;
+    }
+
+    .from {
+      font-size: .78rem;
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+    .subject-line {
+      font-weight: 500;
+      line-height: 1.4;
+    }
+    .reason {
+      font-family: var(--serif);
+      font-style: italic;
+      font-size: .82rem;
+      color: var(--text-muted);
+      margin-top: .3rem;
+      font-variation-settings: "opsz" 60;
+    }
+    .received {
+      font-family: var(--mono);
+      font-size: .73rem;
+      white-space: nowrap;
+      color: var(--text-faint);
+    }
+
+    .raw { margin-top: 2.5rem; }
+  </style>
+{% endblock %}

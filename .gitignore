@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment / secrets — .env.example IS tracked, .env is not
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Local SQLite databases (compose uses a docker volume; this is the host fallback)
+*.db
+*.sqlite
+*.sqlite3
+*-journal
+*-wal
+*-shm
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Claude Code local state (CLAUDE.md, if added, IS tracked)
+.claude/settings.local.json
