@@ -265,6 +265,68 @@ async def ui_unsubscribe_message(task_id: str, message_id: str, request: Request
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
+_BULK_ACTIONS = {"delete", "unsubscribe", "unsubscribe-and-delete"}
+
+
+@app.post("/ui/tasks/{task_id}/bulk/{action}")
+async def ui_bulk_action(task_id: str, action: str, request: Request):
+    if action not in _BULK_ACTIONS:
+        raise HTTPException(status_code=400, detail="Unknown bulk action")
+    user_id = _require_user(request)
+    form = await request.form()
+    message_ids = form.getlist("messages")
+    if not message_ids:
+        return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+
+    task = await _load_task(user_id, task_id)
+    if not task["result"]:
+        raise HTTPException(status_code=404, detail="Task has no result")
+
+    by_id = {m.get("id"): m for m in task["result"].get("messages", [])}
+    targets = [by_id[mid] for mid in message_ids if mid in by_id]
+
+    async def token_provider() -> str:
+        return await acquire_access_token(user_id)
+
+    semaphore = asyncio.Semaphore(4)
+    do_unsub = action in {"unsubscribe", "unsubscribe-and-delete"}
+    do_delete = action in {"delete", "unsubscribe-and-delete"}
+
+    async with GraphClient(token_provider) as graph:
+
+        async def _process(target: dict) -> None:
+            if not target.get("id"):
+                return
+            async with semaphore:
+                if (
+                    do_unsub
+                    and target.get("unsubscribe_url")
+                    and not target.get("unsubscribed")
+                ):
+                    try:
+                        await perform_unsubscribe(
+                            target["unsubscribe_url"],
+                            bool(target.get("unsubscribe_one_click")),
+                        )
+                        target["unsubscribed"] = True
+                        target["unsubscribed_at"] = datetime.now(timezone.utc).isoformat()
+                    except UnsubscribeError as exc:
+                        logger.warning("bulk unsub failed for %s: %s", target["id"], exc)
+
+                if do_delete and not target.get("deleted"):
+                    try:
+                        await graph.request("DELETE", f"/me/messages/{target['id']}")
+                        target["deleted"] = True
+                        target["deleted_at"] = datetime.now(timezone.utc).isoformat()
+                    except (GraphError, TokenAcquisitionError) as exc:
+                        logger.warning("bulk delete failed for %s: %s", target["id"], exc)
+
+        await asyncio.gather(*(_process(t) for t in targets))
+
+    await _save_result(task_id, task["result"])
+    return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+
+
 @app.post("/ui/tasks/{task_id}/messages/{message_id}/unsubscribe-and-delete")
 async def ui_unsubscribe_and_delete(task_id: str, message_id: str, request: Request):
     user_id = _require_user(request)

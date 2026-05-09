@@ -59,20 +59,45 @@
     </p>
 
     {% if task.result.messages %}
+      {% set actionable = task.result.messages | selectattr('spam', 'equalto', true) | rejectattr('deleted') | rejectattr('auto_deleted') | list %}
+
+      {% if actionable %}
+        <div id="bulk-bar" class="bulk-bar" hidden>
+          <span class="bulk-count"><strong id="bulk-count">0</strong> selected</span>
+          <div class="bulk-actions">
+            <button type="button" class="small" data-bulk-action="unsubscribe">unsub</button>
+            <button type="button" class="small danger" data-bulk-action="unsubscribe-and-delete">unsub + del</button>
+            <button type="button" class="small danger" data-bulk-action="delete">delete</button>
+            <button type="button" class="small ghost" id="bulk-clear">clear</button>
+          </div>
+        </div>
+
+        <form id="bulk-form" method="post" action="" data-task-id="{{ task.task_id }}" hidden></form>
+      {% endif %}
+
       <div class="panel flush">
         <table class="audit-table">
           <thead>
             <tr>
+              <th class="check-cell">
+                {% if actionable %}
+                  <input type="checkbox" id="check-all" title="Select all spam" />
+                {% endif %}
+              </th>
               <th style="width: 110px">verdict</th>
               <th style="width: 200px">from</th>
               <th>subject</th>
               <th style="width: 140px">received</th>
-              <th style="width: 220px"></th>
             </tr>
           </thead>
           <tbody>
             {% for m in task.result.messages %}
-              <tr {% if m.deleted or m.auto_deleted %}class="deleted-row"{% endif %}>
+              <tr id="row-{{ m.id }}" {% if m.deleted or m.auto_deleted %}class="deleted-row"{% endif %}>
+                <td class="check-cell">
+                  {% if m.spam == true and not m.deleted and not m.auto_deleted and m.id %}
+                    <input type="checkbox" class="row-check" name="messages" value="{{ m.id }}" />
+                  {% endif %}
+                </td>
                 <td>
                   {% if m.auto_deleted %}
                     <span class="pill muted">auto-deleted</span>
@@ -99,32 +124,6 @@
                   {% if m.reason %}<div class="reason">{{ m.reason }}</div>{% endif %}
                 </td>
                 <td class="meta received">{{ m.received or '' }}</td>
-                <td>
-                  {% if m.spam == true and not m.deleted and not m.auto_deleted and m.id %}
-                    <div class="row-actions">
-                      {% if m.unsubscribe_url and not m.unsubscribed %}
-                        <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/unsubscribe"
-                              method="post" class="inline"
-                              data-confirm="Hit the unsubscribe link for this sender?"
-                              data-confirm-action="Unsubscribe">
-                          <button type="submit" class="small">unsub</button>
-                        </form>
-                        <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/unsubscribe-and-delete"
-                              method="post" class="inline"
-                              data-confirm="Unsubscribe and move to Deleted Items?"
-                              data-confirm-action="Unsubscribe + delete">
-                          <button type="submit" class="small danger">unsub + del</button>
-                        </form>
-                      {% endif %}
-                      <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/delete"
-                            method="post" class="inline"
-                            data-confirm="Move this spam message to Deleted Items?"
-                            data-confirm-action="Delete">
-                        <button type="submit" class="small danger">delete</button>
-                      </form>
-                    </div>
-                  {% endif %}
-                </td>
               </tr>
             {% endfor %}
           </tbody>
@@ -137,6 +136,81 @@
       <pre class="box">{{ raw_json }}</pre>
     </details>
   {% endif %}
+
+  <script>
+    (() => {
+      const bulkBar = document.getElementById('bulk-bar');
+      const bulkForm = document.getElementById('bulk-form');
+      const checkAll = document.getElementById('check-all');
+      const countEl = document.getElementById('bulk-count');
+      if (!bulkBar || !bulkForm) return;
+
+      const taskId = bulkForm.dataset.taskId;
+      const allChecks = () => Array.from(document.querySelectorAll('.row-check'));
+
+      function updateSelection() {
+        const checks = allChecks();
+        const selected = checks.filter(c => c.checked);
+        const n = selected.length;
+        countEl.textContent = String(n);
+        bulkBar.hidden = n === 0;
+        if (checkAll) {
+          checkAll.checked = checks.length > 0 && n === checks.length;
+          checkAll.indeterminate = n > 0 && n < checks.length;
+        }
+      }
+
+      document.addEventListener('change', (e) => {
+        if (e.target && e.target.classList.contains('row-check')) updateSelection();
+      });
+
+      if (checkAll) {
+        checkAll.addEventListener('change', () => {
+          allChecks().forEach(c => { c.checked = checkAll.checked; });
+          updateSelection();
+        });
+      }
+
+      document.getElementById('bulk-clear')?.addEventListener('click', () => {
+        allChecks().forEach(c => { c.checked = false; });
+        updateSelection();
+      });
+
+      const ACTION_VERBS = {
+        'delete': ['Delete', 'Delete'],
+        'unsubscribe': ['Unsubscribe from', 'Unsubscribe'],
+        'unsubscribe-and-delete': ['Unsubscribe and delete', 'Unsub + delete'],
+      };
+
+      document.querySelectorAll('[data-bulk-action]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const action = btn.dataset.bulkAction;
+          const ids = allChecks().filter(c => c.checked).map(c => c.value);
+          if (ids.length === 0) return;
+
+          bulkForm.action = `/ui/tasks/${taskId}/bulk/${action}`;
+          bulkForm.replaceChildren();
+          ids.forEach(id => {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'messages';
+            input.value = id;
+            bulkForm.appendChild(input);
+          });
+
+          const [verb, label] = ACTION_VERBS[action];
+          const noun = `${ids.length} message${ids.length > 1 ? 's' : ''}`;
+          bulkForm.dataset.confirm = `${verb} ${noun}?`;
+          bulkForm.dataset.confirmAction = label;
+          delete bulkForm.dataset.confirmed;
+
+          bulkForm.requestSubmit();
+        });
+      });
+
+      updateSelection();
+    })();
+  </script>
 
   <style>
     .taskid {

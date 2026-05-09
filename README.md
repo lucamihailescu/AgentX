@@ -83,6 +83,7 @@ Then in a browser: <http://localhost:8080> → "Sign in with Microsoft" → land
 | POST | `/ui/tasks/{id}/messages/{mid}/delete` | session / bearer | Move the message to Deleted Items via Graph and mark it `deleted` in the cached report |
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe` | session / bearer | Hit the message's `List-Unsubscribe` HTTPS URL (POST if one-click, else GET); mark `unsubscribed` |
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe-and-delete` | session / bearer | Unsubscribe, then delete |
+| POST | `/ui/tasks/{id}/bulk/{action}` | session / bearer | Bulk variant — `action` ∈ `delete` \| `unsubscribe` \| `unsubscribe-and-delete`. Body is form-encoded `messages=<id>` repeated per selection. Per-message failures log warnings and don't fail the rest. |
 
 ### JSON API
 
