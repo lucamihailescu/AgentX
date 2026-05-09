@@ -8,7 +8,7 @@ from pathlib import Path
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
@@ -25,8 +25,9 @@ from .auth import (
 from .config import settings
 from .db import init_db
 from .graph_client import GraphClient, GraphError
+from . import rules as rules_module
 from .unsubscribe import UnsubscribeError, perform_unsubscribe
-from .worker import Worker
+from .worker import Scheduler, Worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("agentx")
@@ -53,14 +54,18 @@ class TaskStatus(BaseModel):
 async def lifespan(app: FastAPI):
     await init_db()
     worker = Worker()
+    scheduler = Scheduler()
     worker_task = asyncio.create_task(worker.run(), name="worker")
+    scheduler_task = asyncio.create_task(scheduler.run(), name="scheduler")
     logger.info("agent started; authority=%s", settings.authority)
     try:
         yield
     finally:
         await worker.stop()
-        worker_task.cancel()
-        await asyncio.gather(worker_task, return_exceptions=True)
+        await scheduler.stop()
+        for t in (worker_task, scheduler_task):
+            t.cancel()
+        await asyncio.gather(worker_task, scheduler_task, return_exceptions=True)
 
 
 app = FastAPI(title="agentx — consumer Outlook agent", lifespan=lifespan)
@@ -119,7 +124,7 @@ async def index(request: Request):
         cur = await db.execute(
             """SELECT task_id, status, cursor_before, created_at, updated_at
                FROM tasks WHERE user_id = ?
-               ORDER BY created_at DESC LIMIT 50""",
+               ORDER BY created_at DESC LIMIT 10""",
             (user_id,),
         )
         rows = [dict(r) for r in await cur.fetchall()]
@@ -267,7 +272,13 @@ async def ui_unsubscribe_message(task_id: str, message_id: str, request: Request
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
-_BULK_ACTIONS = {"delete", "unsubscribe", "unsubscribe-and-delete"}
+_BULK_ACTIONS = {
+    "delete",
+    "unsubscribe",
+    "unsubscribe-and-delete",
+    "allow",
+    "deny",
+}
 
 
 @app.post("/ui/tasks/{task_id}/bulk/{action}")
@@ -292,7 +303,24 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
 
     semaphore = asyncio.Semaphore(4)
     do_unsub = action in {"unsubscribe", "unsubscribe-and-delete"}
-    do_delete = action in {"delete", "unsubscribe-and-delete"}
+    do_delete = action in {"delete", "unsubscribe-and-delete", "deny"}
+    do_rule = action in {"allow", "deny"}
+
+    if do_rule:
+        seen: set[str] = set()
+        for target in targets:
+            sender = (target.get("from") or "").strip().lower()
+            if not sender or sender in seen:
+                continue
+            seen.add(sender)
+            try:
+                await rules_module.upsert_rule(user_id, sender, "address", action)
+            except ValueError:
+                continue
+            target["rule_applied"] = action
+            if action == "allow":
+                target["spam"] = False
+                target["reason"] = "allowlisted sender"
 
     async with GraphClient(token_provider) as graph:
 
@@ -327,6 +355,152 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
 
     await _save_result(task_id, task["result"])
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+
+
+@app.post("/ui/tasks/{task_id}/messages/{message_id}/rule/{verdict}")
+async def ui_set_rule(task_id: str, message_id: str, verdict: str, request: Request):
+    if verdict not in {"allow", "deny"}:
+        raise HTTPException(status_code=400, detail="Invalid verdict")
+    user_id = _require_user(request)
+    task = await _load_task(user_id, task_id)
+    target = _find_message(task, message_id)
+    sender = (target.get("from") or "").strip().lower()
+    if not sender:
+        raise HTTPException(status_code=400, detail="Message has no sender address")
+    try:
+        await rules_module.upsert_rule(user_id, sender, "address", verdict)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    target["rule_applied"] = verdict
+    if verdict == "allow":
+        target["spam"] = False
+        target["reason"] = "allowlisted sender"
+    else:  # deny → also delete the surfaced message
+        if not target.get("deleted"):
+            await _graph_delete_message(user_id, message_id)
+            target["deleted"] = True
+            target["deleted_at"] = datetime.now(timezone.utc).isoformat()
+        target["reason"] = "denylisted sender"
+
+    await _save_result(task_id, task["result"])
+    return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+
+
+@app.get("/ui/senders", response_class=HTMLResponse)
+async def ui_senders(request: Request):
+    user_id = _require_user(request)
+
+    senders: dict[str, dict] = {}
+    domains: dict[str, dict] = {}
+
+    async with aiosqlite.connect(settings.db_path) as db:
+        cur = await db.execute(
+            "SELECT result_data FROM tasks "
+            "WHERE user_id = ? AND result_data IS NOT NULL",
+            (user_id,),
+        )
+        rows = await cur.fetchall()
+
+    def _bucket(target: dict, m: dict) -> None:
+        target["seen"] += 1
+        if m.get("spam") is True:
+            target["spam"] += 1
+        if m.get("deleted"):
+            target["deleted"] += 1
+        if m.get("unsubscribed"):
+            target["unsubscribed"] += 1
+        if m.get("auto_deleted"):
+            target["auto_deleted"] += 1
+        if m.get("received") and (
+            target["last_seen"] is None or m["received"] > target["last_seen"]
+        ):
+            target["last_seen"] = m["received"]
+
+    def _empty(name: str) -> dict:
+        return {
+            "target": name,
+            "seen": 0,
+            "spam": 0,
+            "deleted": 0,
+            "unsubscribed": 0,
+            "auto_deleted": 0,
+            "last_seen": None,
+        }
+
+    for (raw,) in rows:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for m in data.get("messages", []):
+            sender = (m.get("from") or "").strip().lower()
+            if not sender:
+                continue
+            _bucket(senders.setdefault(sender, _empty(sender)), m)
+            if "@" in sender:
+                domain = sender.split("@", 1)[-1]
+                _bucket(domains.setdefault(domain, _empty(domain)), m)
+
+    rule_index = await rules_module.load_rule_index(user_id)
+    for s in senders.values():
+        s["rule"] = rule_index.get(("address", s["target"]))
+    for d in domains.values():
+        d["rule"] = rule_index.get(("domain", d["target"]))
+
+    senders_sorted = sorted(senders.values(), key=lambda s: (-s["spam"], -s["seen"]))[:100]
+    domains_sorted = sorted(domains.values(), key=lambda d: (-d["spam"], -d["seen"]))[:50]
+
+    return templates.TemplateResponse(
+        "senders.html",
+        {
+            "request": request,
+            "senders": senders_sorted,
+            "domains": domains_sorted,
+            "username": request.session.get("username"),
+        },
+    )
+
+
+@app.get("/ui/rules", response_class=HTMLResponse)
+async def ui_rules(request: Request):
+    user_id = _require_user(request)
+    rules = await rules_module.list_rules(user_id)
+    return templates.TemplateResponse(
+        "rules.html",
+        {
+            "request": request,
+            "rules": rules,
+            "username": request.session.get("username"),
+        },
+    )
+
+
+@app.post("/ui/rules/add")
+async def ui_rule_add(request: Request):
+    user_id = _require_user(request)
+    form = await request.form()
+    target = (form.get("target") or "").strip().lower()
+    target_type = form.get("target_type") or "address"
+    verdict = form.get("verdict") or "allow"
+    if not target:
+        raise HTTPException(status_code=400, detail="target is required")
+    try:
+        await rules_module.upsert_rule(user_id, target, target_type, verdict)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return RedirectResponse("/ui/rules", status_code=303)
+
+
+@app.post("/ui/rules/delete")
+async def ui_rule_delete(request: Request):
+    user_id = _require_user(request)
+    form = await request.form()
+    target = (form.get("target") or "").strip().lower()
+    target_type = form.get("target_type") or "address"
+    if target:
+        await rules_module.delete_rule(user_id, target, target_type)
+    return RedirectResponse("/ui/rules", status_code=303)
 
 
 @app.post("/ui/tasks/{task_id}/messages/{message_id}/unsubscribe-and-delete")
@@ -383,6 +557,84 @@ async def ui_next_page(task_id: str, request: Request):
     cursor = min(received)  # ISO 8601 timestamps sort lexically as datetimes
     new_id = await _insert_task(user_id, cursor_before=cursor)
     return RedirectResponse(f"/ui/tasks/{new_id}", status_code=303)
+
+
+@app.get("/ui/settings", response_class=HTMLResponse)
+async def ui_settings(request: Request):
+    user_id = _require_user(request)
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT schedule_interval_minutes FROM users WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        cur = await db.execute(
+            """SELECT MAX(created_at) AS last_at FROM tasks WHERE user_id = ?""",
+            (user_id,),
+        )
+        last_row = await cur.fetchone()
+    return templates.TemplateResponse(
+        "settings.html",
+        {
+            "request": request,
+            "username": request.session.get("username"),
+            "schedule_interval_minutes": row["schedule_interval_minutes"] if row else None,
+            "default_schedule_interval_minutes": settings.default_schedule_interval_minutes,
+            "last_audit_at": last_row["last_at"] if last_row else None,
+        },
+    )
+
+
+@app.post("/ui/settings")
+async def ui_settings_save(request: Request):
+    user_id = _require_user(request)
+    form = await request.form()
+    raw = (form.get("schedule_interval_minutes") or "").strip()
+    interval: int | None
+    if not raw:
+        interval = None
+    else:
+        try:
+            interval = int(raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="interval must be an integer")
+        if interval <= 0:
+            interval = None
+    async with aiosqlite.connect(settings.db_path) as db:
+        await db.execute(
+            "UPDATE users SET schedule_interval_minutes = ?, updated_at = ? WHERE user_id = ?",
+            (interval, datetime.now(timezone.utc).isoformat(), user_id),
+        )
+        await db.commit()
+    return RedirectResponse("/ui/settings", status_code=303)
+
+
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<rect width="64" height="64" rx="14" fill="#0c0d10"/>'
+    '<rect x="12" y="14" width="40" height="5" rx="2" fill="#f0b842"/>'
+    '<rect x="12" y="25" width="24" height="5" rx="2" fill="#8a8f9c"/>'
+    '<rect x="12" y="36" width="36" height="5" rx="2" fill="#f0b842"/>'
+    '<rect x="12" y="47" width="16" height="5" rx="2" fill="#8a8f9c"/>'
+    "</svg>"
+)
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg():
+    return Response(
+        content=_FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico():
+    # Browsers fall back to /favicon.ico when there's no <link rel="icon">.
+    # We serve the SVG via the link tag in base.html; this exists to silence
+    # 404 noise without serving a real ICO.
+    return Response(status_code=204)
 
 
 @app.get("/healthz")

@@ -8,6 +8,7 @@ import httpx
 from .config import BLOCKED_DOMAINS, settings
 from .graph_client import GraphClient, GraphError
 from .ollama_client import classify
+from .rules import lookup as lookup_rule
 from .unsubscribe import find_unsubscribe
 
 logger = logging.getLogger(__name__)
@@ -107,18 +108,42 @@ async def auto_delete_blocked(graph: GraphClient, messages: list[dict]) -> list[
     return await asyncio.gather(*(_maybe_delete(m) for m in messages))
 
 
-async def classify_messages(messages: list[dict]) -> list[dict]:
+async def classify_messages(
+    messages: list[dict],
+    rules: dict[tuple[str, str], str] | None = None,
+) -> list[dict]:
     """Run each non-auto-deleted message through Ollama in parallel.
 
-    Per-message failures degrade gracefully (spam=None, reason=...) so a
-    flaky/unreachable Ollama doesn't fail the whole task.
+    Sender rules short-circuit Ollama:
+      - `allow`  → spam=False with reason "allowlisted"
+      - `deny`   → spam=True  with reason "denylisted"
+    Per-message Ollama failures degrade gracefully (spam=None) so a flaky or
+    unreachable Ollama doesn't fail the whole task.
     """
+    rules = rules or {}
     semaphore = asyncio.Semaphore(settings.ollama_concurrency)
     async with httpx.AsyncClient(base_url=settings.ollama_url) as client:
 
         async def _one(message: dict) -> dict:
             if message.get("auto_deleted"):
                 return message
+            ruled = lookup_rule(rules, message.get("from"))
+            if ruled == "allow":
+                return {
+                    **message,
+                    "spam": False,
+                    "confidence": 1.0,
+                    "reason": "allowlisted sender",
+                    "rule_applied": "allow",
+                }
+            if ruled == "deny":
+                return {
+                    **message,
+                    "spam": True,
+                    "confidence": 1.0,
+                    "reason": "denylisted sender",
+                    "rule_applied": "deny",
+                }
             async with semaphore:
                 verdict = await classify(client, message)
             return {**message, **verdict}

@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}agentx{% endblock %}</title>
 
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="apple-touch-icon" href="/favicon.svg">
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
@@ -145,6 +148,13 @@
       color: var(--text-muted);
       letter-spacing: -0.01em;
     }
+    .nav-link {
+      color: var(--text-muted);
+      border: none;
+      transition: color .15s;
+    }
+    .nav-link:hover { color: var(--text); border: none; }
+    .nav-sep { color: var(--text-faint); }
 
     /* ───────── typography ───────── */
     h1, h2, h3 {
@@ -336,6 +346,9 @@
     }
     tr.deleted-row td { opacity: .42; }
 
+    tr.clickable-row { cursor: pointer; }
+    tr.clickable-row:hover td:first-child code { color: var(--accent); }
+
     /* ───────── stats ───────── */
     .stats {
       display: grid;
@@ -447,6 +460,51 @@
       border-color: var(--border);
     }
 
+    /* ───────── filter bar ───────── */
+    .filter-bar {
+      display: flex;
+      gap: .75rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 1rem 0 .5rem;
+    }
+    .filter-bar input[type="search"] {
+      flex: 1 1 240px;
+      min-width: 180px;
+      padding: .45rem .75rem;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      font: inherit;
+      font-size: .85rem;
+    }
+    .filter-bar input[type="search"]:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-tint);
+    }
+    .filter-chips { display: flex; gap: .25rem; flex-wrap: wrap; }
+    .chip {
+      font-family: var(--mono);
+      font-size: .68rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: .35rem .65rem;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-muted);
+      border-radius: 99px;
+      cursor: pointer;
+      transition: border-color .15s, color .15s, background .15s;
+    }
+    .chip:hover { color: var(--text); border-color: var(--border-strong); }
+    .chip.active {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: var(--accent-tint);
+    }
+
     pre.box {
       background: var(--surface-2);
       border: 1px solid var(--border);
@@ -541,6 +599,11 @@
       </a>
       {% if username %}
         <div class="nav-meta">
+          <a href="/" class="nav-link">audits</a>
+          <a href="/ui/senders" class="nav-link">senders</a>
+          <a href="/ui/rules" class="nav-link">rules</a>
+          <a href="/ui/settings" class="nav-link">settings</a>
+          <span class="nav-sep">·</span>
           <span>{{ username }}</span>
           <form action="/auth/logout" method="post" class="inline">
             <button type="submit" class="small">sign out</button>

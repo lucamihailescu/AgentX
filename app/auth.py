@@ -1,11 +1,38 @@
 import asyncio
+import base64
+import hashlib
 from datetime import datetime, timezone
+from functools import lru_cache
 
 import aiosqlite
 import msal
+from cryptography.fernet import Fernet, InvalidToken
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from .config import settings
+
+
+@lru_cache(maxsize=1)
+def _cache_cipher() -> Fernet:
+    """Derive a Fernet key from session_secret. Tying to session_secret means
+    rotating it invalidates stored caches (forcing re-sign-in), which is the
+    safe default."""
+    digest = hashlib.sha256(("cache:" + settings.session_secret).encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _encrypt_blob(plaintext: str) -> str:
+    return _cache_cipher().encrypt(plaintext.encode()).decode()
+
+
+def _decrypt_blob(stored: str) -> str:
+    """Decrypt stored cache. Falls back to treating the value as legacy
+    plaintext so existing rows still work — they get re-encrypted on next save.
+    """
+    try:
+        return _cache_cipher().decrypt(stored.encode()).decode()
+    except InvalidToken:
+        return stored
 
 CLI_TOKEN_TTL_SECONDS = 60 * 60
 _CLI_TOKEN_SALT = "agentx.cli-token"
@@ -55,7 +82,7 @@ async def _load_cache(user_id: str) -> msal.SerializableTokenCache:
         cur = await db.execute("SELECT cache_blob FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
     if row:
-        cache.deserialize(row[0])
+        cache.deserialize(_decrypt_blob(row[0]))
     return cache
 
 
@@ -73,7 +100,7 @@ async def _save_cache(
                  cache_blob = excluded.cache_blob,
                  username = COALESCE(excluded.username, users.username),
                  updated_at = excluded.updated_at""",
-            (user_id, username, cache.serialize(), now, now),
+            (user_id, username, _encrypt_blob(cache.serialize()), now, now),
         )
         await db.commit()
 

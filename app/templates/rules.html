@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}agentx — rules{% endblock %}
+{% block body %}
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">configuration</div>
+      <h1>Sender <em>rules</em>.</h1>
+    </div>
+  </div>
+
+  <p class="meta" style="max-width: 60ch">
+    Allowlisted senders skip Ollama classification entirely (always treated as
+    safe). Denylisted senders skip Ollama too — they're marked spam and
+    deleted on the next audit. Address rules win over domain rules.
+  </p>
+
+  <div class="panel" style="margin: 1.5rem 0">
+    <h2 style="margin-top: 0; font-size: 1rem">Add rule</h2>
+    <form method="post" action="/ui/rules/add" class="rule-form">
+      <input type="text" name="target" placeholder="user@example.com or example.com" required>
+      <select name="target_type">
+        <option value="address">address</option>
+        <option value="domain">domain</option>
+      </select>
+      <select name="verdict">
+        <option value="allow">allow</option>
+        <option value="deny">deny</option>
+      </select>
+      <button type="submit" class="primary">add</button>
+    </form>
+  </div>
+
+  {% if rules %}
+    <div class="panel flush">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 90px">verdict</th>
+            <th style="width: 110px">type</th>
+            <th>target</th>
+            <th style="width: 200px">added</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rules %}
+            <tr>
+              <td>
+                {% if r.verdict == 'allow' %}
+                  <span class="pill ham">allow</span>
+                {% else %}
+                  <span class="pill spam">deny</span>
+                {% endif %}
+              </td>
+              <td><code class="meta" style="font-size: .75rem">{{ r.target_type }}</code></td>
+              <td><code>{{ r.target }}</code></td>
+              <td class="meta mono" style="font-size: .75rem">{{ r.created_at }}</td>
+              <td style="text-align: right">
+                <form method="post" action="/ui/rules/delete" class="inline"
+                      data-confirm="Remove this rule?" data-confirm-action="Remove">
+                  <input type="hidden" name="target" value="{{ r.target }}">
+                  <input type="hidden" name="target_type" value="{{ r.target_type }}">
+                  <button type="submit" class="small">remove</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="panel">
+      <div class="empty">No rules yet. Add one above, or click the allow/block buttons inside an audit.</div>
+    </div>
+  {% endif %}
+
+  <style>
+    .rule-form {
+      display: flex;
+      gap: .5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .rule-form input[type=text] {
+      flex: 1 1 280px;
+      min-width: 200px;
+      padding: .5rem .65rem;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      font: inherit;
+      font-family: var(--mono);
+      font-size: .82rem;
+    }
+    .rule-form select {
+      padding: .5rem .65rem;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      font: inherit;
+      font-size: .82rem;
+    }
+  </style>
+{% endblock %}

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}agentx — settings{% endblock %}
+{% block body %}
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">configuration</div>
+      <h1>Settings.</h1>
+    </div>
+  </div>
+
+  <div class="panel" style="max-width: 620px">
+    <h2 style="margin-top: 0; font-size: 1rem">Scheduled audits</h2>
+    <p class="meta" style="max-width: 56ch">
+      Run an audit automatically every N minutes. The agent skips a run if a
+      previous audit is still in flight, so increasing the interval is safe.
+      Leave blank to fall back to the default
+      {% if default_schedule_interval_minutes %}
+        (currently <code>{{ default_schedule_interval_minutes }} min</code> from
+        <code>AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES</code>)
+      {% else %}
+        (no default set — leaving blank disables scheduling)
+      {% endif %}.
+    </p>
+
+    <form method="post" action="/ui/settings" class="settings-form">
+      <label>
+        <span>Run every</span>
+        <input type="number" name="schedule_interval_minutes" min="0"
+               value="{{ schedule_interval_minutes or '' }}"
+               placeholder="(disabled)" />
+        <span class="unit">minutes</span>
+      </label>
+      <button type="submit" class="primary">save</button>
+    </form>
+
+    <p class="meta" style="margin-top: 1.25rem; font-size: .8rem">
+      <span class="eyebrow inline">last audit</span>&nbsp;
+      <code>{{ last_audit_at or '— none yet —' }}</code>
+    </p>
+  </div>
+
+  <style>
+    .settings-form {
+      display: flex;
+      gap: .65rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-top: 1.25rem;
+    }
+    .settings-form label {
+      display: flex;
+      align-items: center;
+      gap: .55rem;
+    }
+    .settings-form input[type="number"] {
+      width: 84px;
+      padding: .45rem .6rem;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      font: inherit;
+      font-family: var(--mono);
+      font-size: .85rem;
+    }
+    .settings-form .unit {
+      color: var(--text-muted);
+      font-size: .85rem;
+    }
+  </style>
+{% endblock %}

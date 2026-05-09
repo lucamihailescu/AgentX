@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}agentx — senders{% endblock %}
+{% block body %}
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">aggregate</div>
+      <h1>Senders <em>history</em>.</h1>
+    </div>
+  </div>
+
+  <p class="meta" style="max-width: 60ch">
+    Counts across every audit you've run. Use the action buttons to allowlist
+    or block a sender — future audits skip Ollama for them and apply the rule
+    immediately.
+  </p>
+
+  {% macro sender_table(rows, target_type, top_n) %}
+    {% if rows %}
+      <div class="panel flush">
+        <table>
+          <thead>
+            <tr>
+              <th>{{ target_type }}</th>
+              <th style="width: 80px">seen</th>
+              <th style="width: 80px">spam</th>
+              <th style="width: 90px">spam %</th>
+              <th style="width: 80px">deleted</th>
+              <th style="width: 90px">unsub</th>
+              <th style="width: 170px">last seen</th>
+              <th style="width: 200px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rows[:top_n] %}
+              <tr>
+                <td><code>{{ r.target }}</code></td>
+                <td class="mono">{{ r.seen }}</td>
+                <td class="mono"><span class="verdict-spam">{{ r.spam }}</span></td>
+                <td class="meta mono" style="font-size: .78rem">
+                  {% if r.seen %}{{ '%.0f' | format(r.spam / r.seen * 100) }}%{% else %}—{% endif %}
+                </td>
+                <td class="mono">{{ r.deleted }}</td>
+                <td class="mono">{{ r.unsubscribed }}</td>
+                <td class="meta mono" style="font-size: .73rem">{{ r.last_seen or '—' }}</td>
+                <td style="text-align: right">
+                  {% if r.rule == 'allow' %}
+                    <span class="pill ham">allowed</span>
+                  {% elif r.rule == 'deny' %}
+                    <span class="pill spam">denied</span>
+                  {% else %}
+                    <form method="post" action="/ui/rules/add" class="inline">
+                      <input type="hidden" name="target" value="{{ r.target }}">
+                      <input type="hidden" name="target_type" value="{{ target_type }}">
+                      <input type="hidden" name="verdict" value="allow">
+                      <button type="submit" class="small">allow</button>
+                    </form>
+                    <form method="post" action="/ui/rules/add" class="inline"
+                          data-confirm="Block all mail from {{ r.target }}?"
+                          data-confirm-action="Block">
+                      <input type="hidden" name="target" value="{{ r.target }}">
+                      <input type="hidden" name="target_type" value="{{ target_type }}">
+                      <input type="hidden" name="verdict" value="deny">
+                      <button type="submit" class="small danger">block</button>
+                    </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="panel">
+        <div class="empty">No data yet — generate a few audits first.</div>
+      </div>
+    {% endif %}
+  {% endmacro %}
+
+  <h2 style="margin-top: 2rem">Top domains</h2>
+  {{ sender_table(domains, 'domain', 50) }}
+
+  <h2 style="margin-top: 2rem">Top senders</h2>
+  {{ sender_table(senders, 'address', 100) }}
+{% endblock %}

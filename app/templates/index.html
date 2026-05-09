@@ -3,7 +3,7 @@
 {% block body %}
   <div class="page-head">
     <div>
-      <div class="eyebrow">queue · {{ tasks|length }} record{% if tasks|length != 1 %}s{% endif %}</div>
+      <div class="eyebrow">queue · last {{ tasks|length }} record{% if tasks|length != 1 %}s{% endif %}</div>
       <h1>Mailbox <em>audits</em>.</h1>
     </div>
     <div class="actions">
@@ -15,27 +15,25 @@
 
   {% if tasks %}
     <div class="panel flush">
-      <table>
+      <table class="audits-table">
         <thead>
           <tr>
-            <th style="width: 110px">id</th>
+            <th style="width: 140px">id</th>
             <th style="width: 140px">status</th>
             <th>created</th>
-            <th style="text-align: right">&nbsp;</th>
           </tr>
         </thead>
         <tbody>
           {% for t in tasks %}
-            <tr>
+            <tr class="clickable-row" data-href="/ui/tasks/{{ t.task_id }}">
               <td>
-                <code><a class="plain" href="/ui/tasks/{{ t.task_id }}">{{ t.task_id[:8] }}</a></code>
+                <code>{{ t.task_id[:8] }}</code>
                 {% if t.cursor_before %}
                   <div class="meta mono" style="font-size: .68rem; margin-top: .15rem">before {{ t.cursor_before }}</div>
                 {% endif %}
               </td>
               <td><span class="pill {{ t.status }}">{{ t.status }}</span></td>
               <td class="meta mono" style="font-size: .78rem">{{ t.created_at }}</td>
-              <td style="text-align: right"><a href="/ui/tasks/{{ t.task_id }}">open →</a></td>
             </tr>
           {% endfor %}
         </tbody>
@@ -46,4 +44,14 @@
       <div class="empty">No audits yet — generate one to begin.</div>
     </div>
   {% endif %}
+
+  <script>
+    document.querySelectorAll('tr.clickable-row').forEach(row => {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('a, button, form')) return;
+        const href = row.dataset.href;
+        if (href) window.location.assign(href);
+      });
+    });
+  </script>
 {% endblock %}

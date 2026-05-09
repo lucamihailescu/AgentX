@@ -68,6 +68,8 @@
         <div id="bulk-bar" class="bulk-bar" hidden>
           <span class="bulk-count"><strong id="bulk-count">0</strong> selected</span>
           <div class="bulk-actions">
+            <button type="button" class="small" data-bulk-action="allow">allow sender</button>
+            <button type="button" class="small danger" data-bulk-action="deny">block sender</button>
             <button type="button" class="small" data-bulk-action="unsubscribe">unsub</button>
             <button type="button" class="small danger" data-bulk-action="unsubscribe-and-delete">unsub + del</button>
             <button type="button" class="small danger" data-bulk-action="delete">delete</button>
@@ -77,6 +79,19 @@
 
         <form id="bulk-form" method="post" action="" data-task-id="{{ task.task_id }}" hidden></form>
       {% endif %}
+
+      <div class="filter-bar">
+        <input type="search" id="filter-text" placeholder="filter by sender or subject…" autocomplete="off">
+        <div class="filter-chips">
+          <button type="button" class="chip active" data-filter-status="">all</button>
+          <button type="button" class="chip" data-filter-status="spam">spam</button>
+          <button type="button" class="chip" data-filter-status="ok">ok</button>
+          <button type="button" class="chip" data-filter-status="unknown">?</button>
+          <button type="button" class="chip" data-filter-status="deleted">deleted</button>
+          <button type="button" class="chip" data-filter-status="unsubscribed">unsub</button>
+          <button type="button" class="chip" data-filter-status="auto-deleted">auto-del</button>
+        </div>
+      </div>
 
       <div class="panel flush">
         <table class="audit-table">
@@ -91,11 +106,22 @@
               <th style="width: 200px">from</th>
               <th>subject</th>
               <th style="width: 140px">received</th>
+              <th style="width: 90px"></th>
             </tr>
           </thead>
           <tbody>
             {% for m in task.result.messages %}
-              <tr id="row-{{ m.id }}" {% if m.deleted or m.auto_deleted %}class="deleted-row"{% endif %}>
+              {% if m.auto_deleted %}{% set row_status = 'auto-deleted' %}
+              {% elif m.deleted %}{% set row_status = 'deleted' %}
+              {% elif m.unsubscribed %}{% set row_status = 'unsubscribed' %}
+              {% elif m.spam == true %}{% set row_status = 'spam' %}
+              {% elif m.spam == false %}{% set row_status = 'ok' %}
+              {% else %}{% set row_status = 'unknown' %}
+              {% endif %}
+              <tr id="row-{{ m.id }}"
+                  {% if m.deleted or m.auto_deleted %}class="deleted-row"{% endif %}
+                  data-status="{{ row_status }}"
+                  data-search="{{ ((m.from or '') ~ ' ' ~ (m.subject or '')) | lower | e }}">
                 <td class="check-cell">
                   {% if m.spam == true and not m.deleted and not m.auto_deleted and m.id %}
                     <input type="checkbox" class="row-check" name="messages" value="{{ m.id }}" />
@@ -127,6 +153,22 @@
                   {% if m.reason %}<div class="reason">{{ m.reason }}</div>{% endif %}
                 </td>
                 <td class="meta received">{{ m.received or '' }}</td>
+                <td class="row-rules">
+                  {% if m.spam == true and not m.deleted and not m.auto_deleted and m.id and m.from %}
+                    <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/rule/allow"
+                          method="post" class="inline"
+                          data-confirm="Always allow {{ m.from }}?"
+                          data-confirm-action="Allow">
+                      <button type="submit" class="rule-btn allow" title="Always allow this sender">✓</button>
+                    </form>
+                    <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/rule/deny"
+                          method="post" class="inline"
+                          data-confirm="Always block {{ m.from }} and delete this message?"
+                          data-confirm-action="Block + delete">
+                      <button type="submit" class="rule-btn deny" title="Always block this sender">✕</button>
+                    </form>
+                  {% endif %}
+                </td>
               </tr>
             {% endfor %}
           </tbody>
@@ -201,6 +243,8 @@
         'delete': ['Delete', 'Delete'],
         'unsubscribe': ['Unsubscribe from', 'Unsubscribe'],
         'unsubscribe-and-delete': ['Unsubscribe and delete', 'Unsub + delete'],
+        'allow': ['Allow senders of', 'Allow'],
+        'deny': ['Block senders of, then delete,', 'Block + delete'],
       };
 
       document.querySelectorAll('[data-bulk-action]').forEach(btn => {
@@ -230,6 +274,29 @@
       });
 
       updateSelection();
+
+      // ───── filter bar ─────
+      const filterText = document.getElementById('filter-text');
+      const chips = document.querySelectorAll('.chip[data-filter-status]');
+      let activeStatus = '';
+
+      function applyFilter() {
+        const q = (filterText?.value || '').trim().toLowerCase();
+        document.querySelectorAll('tr[data-status]').forEach(row => {
+          const matchText = !q || (row.dataset.search || '').includes(q);
+          const matchStatus = !activeStatus || row.dataset.status === activeStatus;
+          row.style.display = matchText && matchStatus ? '' : 'none';
+        });
+      }
+
+      filterText?.addEventListener('input', applyFilter);
+      chips.forEach(chip => {
+        chip.addEventListener('click', () => {
+          activeStatus = chip.dataset.filterStatus;
+          chips.forEach(c => c.classList.toggle('active', c === chip));
+          applyFilter();
+        });
+      });
     })();
   </script>
 
@@ -300,6 +367,28 @@
     }
 
     .raw { margin-top: 2.5rem; }
+
+    .row-rules {
+      white-space: nowrap;
+      text-align: right;
+    }
+    .rule-btn {
+      padding: 0;
+      width: 26px;
+      height: 26px;
+      font-size: .85rem;
+      line-height: 1;
+      border-radius: 4px;
+      cursor: pointer;
+      background: transparent;
+      border: 1px solid var(--border-strong);
+      color: var(--text-muted);
+      margin-left: .25rem;
+      font-family: var(--mono);
+    }
+    .rule-btn:hover { color: var(--text); }
+    .rule-btn.allow:hover { color: var(--ham); border-color: var(--ham); background: var(--ham-tint); }
+    .rule-btn.deny:hover { color: var(--spam); border-color: var(--spam); background: var(--spam-tint); }
 
     .next-page {
       margin: 2.5rem 0 0;

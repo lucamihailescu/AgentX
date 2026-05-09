@@ -34,14 +34,15 @@ So this codebase drops the sidecar and goes straight to MSAL. The "long-running"
 
 | File | Role |
 | --- | --- |
-| `app/main.py` | FastAPI app: HTML pages (`/`, `/ui/tasks/{id}`), JSON API (`/tasks`, `/tasks/{id}`), auth (`/auth/*`) |
-| `app/auth.py` | MSAL `ConfidentialClientApplication` wrapper; per-user `SerializableTokenCache` persisted in SQLite; CLI-token signer (itsdangerous) |
+| `app/main.py` | FastAPI app: HTML pages (`/`, `/ui/tasks/{id}`, `/ui/rules`, `/ui/senders`, `/ui/settings`), JSON API (`/tasks`, `/tasks/{id}`), auth (`/auth/*`) |
+| `app/auth.py` | MSAL `ConfidentialClientApplication` wrapper; per-user `SerializableTokenCache` persisted **encrypted** in SQLite (Fernet, key derived from `SESSION_SECRET`); CLI-token signer (itsdangerous) |
+| `app/rules.py` | Per-user `sender_rules` CRUD + lookup helper. Address rules win over domain rules. |
 | `app/graph_client.py` | Async Graph wrapper that pulls a fresh token from a `token_provider` callable before every request |
-| `app/tasks.py` | Pipeline: fetch messages → classify each via Ollama → build report dict |
+| `app/tasks.py` | Pipeline: fetch messages → auto-delete blocked → apply sender rules → classify remaining via Ollama → build report dict |
 | `app/ollama_client.py` | Async client for `POST {OLLAMA_URL}/api/generate` with `format=json`; defensive parsing |
-| `app/worker.py` | Asyncio worker that claims `queued` rows, runs the pipeline, persists the JSON report on the row |
-| `app/templates/` | Jinja2 templates: `base.html`, `login.html`, `index.html`, `task.html` |
-| `app/db.py` | SQLite schema (`users`, `tasks` with `result_data` JSON blob) |
+| `app/worker.py` | Two background loops: `Worker` claims queued rows and runs the pipeline; `Scheduler` queues new audits per user on a configurable interval |
+| `app/templates/` | Jinja2 templates: `base.html`, `login.html`, `index.html`, `task.html`, `rules.html`, `senders.html`, `settings.html` |
+| `app/db.py` | SQLite schema (`users`, `tasks`, `sender_rules`); idempotent ALTERs for forward-compat |
 | `app/config.py` | Pydantic settings loaded from `AGENT_*` env vars |
 
 The agent's stable per-user identifier is MSAL's `home_account_id` — used as the FK on `tasks.user_id` and as the payload in the CLI bearer token.
@@ -79,12 +80,19 @@ Then in a browser: <http://localhost:8080> → "Sign in with Microsoft" → land
 | --- | --- | --- | --- |
 | GET | `/` | optional | Sign-in page when signed out; task list when signed in |
 | POST | `/ui/tasks` | session | Form action — queues a task and redirects to its detail page |
-| GET | `/ui/tasks/{id}` | session / bearer | Task detail page with rendered report (auto-refreshes while pending) |
+| GET | `/ui/tasks/{id}` | session / bearer | Task detail page with rendered report (auto-refreshes while pending). Includes filter bar (text + status chips) and per-row allow/block icons. |
 | POST | `/ui/tasks/{id}/messages/{mid}/delete` | session / bearer | Move the message to Deleted Items via Graph and mark it `deleted` in the cached report |
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe` | session / bearer | Hit the message's `List-Unsubscribe` HTTPS URL (POST if one-click, else GET); mark `unsubscribed` |
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe-and-delete` | session / bearer | Unsubscribe, then delete |
-| POST | `/ui/tasks/{id}/bulk/{action}` | session / bearer | Bulk variant — `action` ∈ `delete` \| `unsubscribe` \| `unsubscribe-and-delete`. Body is form-encoded `messages=<id>` repeated per selection. Per-message failures log warnings and don't fail the rest. |
+| POST | `/ui/tasks/{id}/messages/{mid}/rule/{verdict}` | session / bearer | Create an `address` rule (`allow` or `deny`) for this message's sender. `deny` also deletes the message. |
+| POST | `/ui/tasks/{id}/bulk/{action}` | session / bearer | Bulk variant — `action` ∈ `delete` \| `unsubscribe` \| `unsubscribe-and-delete` \| `allow` \| `deny`. Body is form-encoded `messages=<id>` repeated per selection. Per-message failures log warnings and don't fail the rest. |
 | POST | `/ui/tasks/{id}/next` | session / bearer | Creates a new audit whose `cursor_before` is set to the oldest message of this audit — i.e. "next page" of older mail. Redirects to the new audit. |
+| GET | `/ui/rules` | session | Manage sender allow/deny rules. |
+| POST | `/ui/rules/add` | session | Form action: add an address or domain rule. |
+| POST | `/ui/rules/delete` | session | Form action: remove a rule. |
+| GET | `/ui/senders` | session | Aggregated stats per sender / domain across every audit, with one-click allow/block. |
+| GET | `/ui/settings` | session | View / change scheduled-audit interval. |
+| POST | `/ui/settings` | session | Save scheduled-audit interval. |
 
 ### JSON API
 
@@ -220,11 +228,36 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_OLLAMA_NUM_PREDICT` | `200` | Cap on output tokens per call. JSON verdict is well under 100 tokens. |
 | `AGENT_MAX_MESSAGES_PER_AUDIT` | `200` | Cap on messages fetched per audit. Agent walks `@odata.nextLink` 50 messages at a time up to this number. Use **Next page** on a finished audit to keep walking older mail. |
 | `AGENT_BLOCKED_DOMAINS` | *(empty)* | Comma-separated sender domains whose mail is auto-deleted at fetch time. Subdomain matching enabled. |
+| `AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES` | *(empty)* | Fallback scheduler interval, in minutes. Used when a user hasn't set their own on `/ui/settings`. Per-user value always wins. |
+| `AGENT_SCHEDULER_TICK_SECONDS` | `60` | How often the scheduler wakes to check whether any user is due. |
+
+## Sender rules (allowlist / denylist)
+
+The model misclassifies sometimes — a newsletter you actually want gets flagged spam, or a relentless marketer keeps slipping through. Rules close the feedback loop:
+
+- **Address rule** (`user@example.com`) — exact match.
+- **Domain rule** (`example.com`) — matches that domain and any subdomain.
+- **Verdict**: `allow` (skip Ollama, mark `ok`) or `deny` (skip Ollama, mark spam — and on the click that creates the rule, the surfaced message is deleted).
+
+Per-row buttons inside an audit (✓ allow / ✕ block) create address rules from the message's `from`. Bulk variants (`allow sender` / `block sender` in the toolbar) create one rule per unique sender across the selection. The full set is editable on **`/ui/rules`** — and the **`/ui/senders`** page surfaces aggregate counts so you can spot which domains keep showing up.
+
+## Scheduled audits
+
+The `Scheduler` background loop wakes every `AGENT_SCHEDULER_TICK_SECONDS` (default 60s), looks for users due for a run, and queues a new audit — skipping users with one already in flight.
+
+Two ways to set the interval, with **per-user override taking precedence**:
+
+1. **Per-user** via `/ui/settings` ("Run every N minutes") — stored on the `users.schedule_interval_minutes` column.
+2. **Global default** via `AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES` in `.env` — applied to any user without an explicit override.
+
+If neither is set, scheduling is disabled. The interval is in minutes — `15` for "every 15 minutes", `60` for hourly, `360` for every 6h. The scheduler tick rate (`AGENT_SCHEDULER_TICK_SECONDS`, default 60s) bounds the precision; lower it if you want sub-minute scheduling.
+
+This pairs naturally with rules + the domain blocklist: once you've trained the system, scheduled audits can run unattended and the inbox stays clean.
 
 ## Limitations
 
 - **Refresh-token lifetime for personal accounts is set by Microsoft**, sliding ~24h with a 90-day cap. There's no `TokenLifetimePolicy` knob — plan tasks for hours-to-low-days, not weeks.
-- **Token cache is unencrypted** in SQLite. For production, encrypt the `cache_blob` column or move the cache to a KMS-backed store.
+- **Token cache is encrypted at rest** with a Fernet key derived from `SESSION_SECRET`. Rotating the secret invalidates all stored caches (forcing re-sign-in), which is the safe default — but you don't get cross-host portability for free. Move to a KMS-backed key if you need that.
 - **Single worker.** `_claim_next` does a non-locking `SELECT … LIMIT 1` followed by an `UPDATE`. To scale out, swap SQLite for Postgres and use `SELECT … FOR UPDATE SKIP LOCKED`.
 - **No retry budget** beyond what MSAL/HTTPX do internally — failures mark the task `failed` and stop. Add a retry counter on the `tasks` row if you need it.
 - **CLI tokens carry full user authority** for 1 hour. Treat them like passwords; don't paste into chat or log them.

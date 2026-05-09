@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     session_secret: str
     db_path: str = "tasks.db"
     worker_poll_interval_seconds: float = 2.0
+    default_schedule_interval_minutes: int | None = None
+    scheduler_tick_seconds: float = 60.0
 
     max_messages_per_audit: int = 200
 
