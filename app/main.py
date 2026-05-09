@@ -42,6 +42,7 @@ class CreateTaskResponse(BaseModel):
 class TaskStatus(BaseModel):
     task_id: str
     status: str
+    cursor_before: str | None = None
     error: str | None = None
     result: dict | None = None
     created_at: str
@@ -82,14 +83,15 @@ def _require_user(request: Request) -> str:
     )
 
 
-async def _insert_task(user_id: str) -> str:
+async def _insert_task(user_id: str, cursor_before: str | None = None) -> str:
     task_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(settings.db_path) as db:
         await db.execute(
-            """INSERT INTO tasks (task_id, user_id, status, created_at, updated_at)
-               VALUES (?, ?, 'queued', ?, ?)""",
-            (task_id, user_id, now, now),
+            """INSERT INTO tasks
+               (task_id, user_id, status, cursor_before, created_at, updated_at)
+               VALUES (?, ?, 'queued', ?, ?, ?)""",
+            (task_id, user_id, cursor_before, now, now),
         )
         await db.commit()
     return task_id
@@ -115,7 +117,7 @@ async def index(request: Request):
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            """SELECT task_id, status, created_at, updated_at
+            """SELECT task_id, status, cursor_before, created_at, updated_at
                FROM tasks WHERE user_id = ?
                ORDER BY created_at DESC LIMIT 50""",
             (user_id,),
@@ -357,11 +359,30 @@ async def get_task(task_id: str, request: Request):
     return TaskStatus(
         task_id=task["task_id"],
         status=task["status"],
+        cursor_before=task.get("cursor_before"),
         error=task["error"],
         result=task["result"],
         created_at=task["created_at"],
         updated_at=task["updated_at"],
     )
+
+
+@app.post("/ui/tasks/{task_id}/next")
+async def ui_next_page(task_id: str, request: Request):
+    user_id = _require_user(request)
+    parent = await _load_task(user_id, task_id)
+    if not parent["result"]:
+        raise HTTPException(status_code=400, detail="Parent audit has no result")
+    received = [
+        m["received"]
+        for m in parent["result"].get("messages", [])
+        if m.get("received")
+    ]
+    if not received:
+        raise HTTPException(status_code=400, detail="Parent audit has no message timestamps")
+    cursor = min(received)  # ISO 8601 timestamps sort lexically as datetimes
+    new_id = await _insert_task(user_id, cursor_before=cursor)
+    return RedirectResponse(f"/ui/tasks/{new_id}", status_code=303)
 
 
 @app.get("/healthz")

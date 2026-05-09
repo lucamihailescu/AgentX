@@ -40,7 +40,7 @@ class Worker:
         async with aiosqlite.connect(settings.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT task_id, user_id FROM tasks "
+                "SELECT task_id, user_id, cursor_before FROM tasks "
                 "WHERE status = 'queued' ORDER BY created_at LIMIT 1"
             )
             row = await cur.fetchone()
@@ -60,9 +60,10 @@ class Worker:
         async def token_provider() -> str:
             return await acquire_access_token(user_id)
 
+        cursor_before = task.get("cursor_before")
         try:
             async with GraphClient(token_provider) as graph:
-                messages = await fetch_messages(graph)
+                messages = await fetch_messages(graph, cursor_before=cursor_before)
                 messages = await auto_delete_blocked(graph, messages)
             classified = await classify_messages(messages)
             report = await generate_report(classified)

@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3.2"
     ollama_timeout_seconds: float = 30.0
     ollama_concurrency: int = 4
+    ollama_num_ctx: int = 1024
+    ollama_temperature: float = 0.0
+    ollama_num_predict: int = 200
 
     # Comma-separated; parsed into BLOCKED_DOMAINS below. Kept as a raw string
     # to avoid pydantic-settings auto-JSON-decoding it.

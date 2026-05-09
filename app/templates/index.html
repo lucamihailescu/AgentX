@@ -27,7 +27,12 @@
         <tbody>
           {% for t in tasks %}
             <tr>
-              <td><code><a class="plain" href="/ui/tasks/{{ t.task_id }}">{{ t.task_id[:8] }}</a></code></td>
+              <td>
+                <code><a class="plain" href="/ui/tasks/{{ t.task_id }}">{{ t.task_id[:8] }}</a></code>
+                {% if t.cursor_before %}
+                  <div class="meta mono" style="font-size: .68rem; margin-top: .15rem">before {{ t.cursor_before }}</div>
+                {% endif %}
+              </td>
               <td><span class="pill {{ t.status }}">{{ t.status }}</span></td>
               <td class="meta mono" style="font-size: .78rem">{{ t.created_at }}</td>
               <td style="text-align: right"><a href="/ui/tasks/{{ t.task_id }}">open →</a></td>

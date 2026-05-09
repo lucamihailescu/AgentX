@@ -84,6 +84,7 @@ Then in a browser: <http://localhost:8080> → "Sign in with Microsoft" → land
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe` | session / bearer | Hit the message's `List-Unsubscribe` HTTPS URL (POST if one-click, else GET); mark `unsubscribed` |
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe-and-delete` | session / bearer | Unsubscribe, then delete |
 | POST | `/ui/tasks/{id}/bulk/{action}` | session / bearer | Bulk variant — `action` ∈ `delete` \| `unsubscribe` \| `unsubscribe-and-delete`. Body is form-encoded `messages=<id>` repeated per selection. Per-message failures log warnings and don't fail the rest. |
+| POST | `/ui/tasks/{id}/next` | session / bearer | Creates a new audit whose `cursor_before` is set to the oldest message of this audit — i.e. "next page" of older mail. Redirects to the new audit. |
 
 ### JSON API
 
@@ -214,7 +215,10 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_OLLAMA_MODEL` | `llama3.2` | Model name (must be pulled in the target Ollama instance) |
 | `AGENT_OLLAMA_TIMEOUT_SECONDS` | `30.0` | Per-request timeout |
 | `AGENT_OLLAMA_CONCURRENCY` | `4` | Max parallel classification requests |
-| `AGENT_MAX_MESSAGES_PER_AUDIT` | `200` | Cap on messages fetched per audit. Agent walks `@odata.nextLink` 50 messages at a time up to this number. |
+| `AGENT_OLLAMA_NUM_CTX` | `1024` | Ollama context window (`num_ctx`). Each prompt is ~200–300 tokens so 1024 is comfortable headroom. |
+| `AGENT_OLLAMA_TEMPERATURE` | `0.0` | Classifier sampling temperature. `0` = deterministic verdicts. |
+| `AGENT_OLLAMA_NUM_PREDICT` | `200` | Cap on output tokens per call. JSON verdict is well under 100 tokens. |
+| `AGENT_MAX_MESSAGES_PER_AUDIT` | `200` | Cap on messages fetched per audit. Agent walks `@odata.nextLink` 50 messages at a time up to this number. Use **Next page** on a finished audit to keep walking older mail. |
 | `AGENT_BLOCKED_DOMAINS` | *(empty)* | Comma-separated sender domains whose mail is auto-deleted at fetch time. Subdomain matching enabled. |
 
 ## Limitations

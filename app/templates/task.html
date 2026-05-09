@@ -20,6 +20,9 @@
     <span class="eyebrow inline">created</span>&nbsp;{{ task.created_at }}
     &nbsp;·&nbsp;
     <span class="eyebrow inline">updated</span>&nbsp;{{ task.updated_at }}
+    {% if task.cursor_before %}
+      &nbsp;·&nbsp; <span class="eyebrow inline">before</span>&nbsp;<code>{{ task.cursor_before }}</code>
+    {% endif %}
     {% if task.status in ("queued", "processing") %}
       &nbsp;·&nbsp; <span class="ar">auto-refreshing every 2s</span>
     {% endif %}
@@ -129,6 +132,24 @@
           </tbody>
         </table>
       </div>
+    {% endif %}
+
+    {% if task.status == 'completed' and task.result and task.result.message_count > 0 %}
+      {% set received_dates = task.result.messages | map(attribute='received') | select | list %}
+      {% if received_dates %}
+        <div class="next-page">
+          <p class="meta range">
+            <span class="eyebrow inline">range</span>&nbsp;
+            <code>{{ received_dates | max }}</code>
+            &nbsp;→&nbsp;
+            <code>{{ received_dates | min }}</code>
+          </p>
+          <form action="/ui/tasks/{{ task.task_id }}/next" method="post" class="inline">
+            <button type="submit" class="primary">Next page →</button>
+          </form>
+          <p class="meta hint">Continues older than the oldest message in this audit.</p>
+        </div>
+      {% endif %}
     {% endif %}
 
     <details class="raw">
@@ -279,5 +300,36 @@
     }
 
     .raw { margin-top: 2.5rem; }
+
+    .next-page {
+      margin: 2.5rem 0 0;
+      padding: 1.25rem 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      display: grid;
+      grid-template-columns: 1fr auto;
+      grid-template-rows: auto auto;
+      gap: .5rem 1.5rem;
+      align-items: center;
+    }
+    .next-page .range {
+      grid-column: 1;
+      grid-row: 1;
+      margin: 0;
+      font-size: .8rem;
+    }
+    .next-page form {
+      grid-column: 2;
+      grid-row: 1 / span 2;
+      align-self: center;
+    }
+    .next-page .hint {
+      grid-column: 1;
+      grid-row: 2;
+      margin: 0;
+      color: var(--text-faint);
+      font-size: .78rem;
+    }
   </style>
 {% endblock %}

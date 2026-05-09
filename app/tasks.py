@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import httpx
 
@@ -26,18 +27,30 @@ def is_blocked(address: str | None, blocked: frozenset[str] | set[str]) -> bool:
 _GRAPH_PAGE_SIZE = 50  # Graph's preferred page size; we walk @odata.nextLink for more.
 
 
-async def fetch_messages(graph: GraphClient, limit: int | None = None) -> list[dict]:
+async def fetch_messages(
+    graph: GraphClient,
+    limit: int | None = None,
+    cursor_before: str | None = None,
+) -> list[dict]:
     """Fetch up to `limit` messages (default `settings.max_messages_per_audit`)
     by walking Microsoft Graph's `@odata.nextLink` pagination.
+
+    If `cursor_before` (an ISO 8601 timestamp) is provided, only messages
+    received strictly before that time are returned — the basis for the
+    "Next page" flow that walks back through the mailbox in batches.
     """
     target = limit if limit is not None else settings.max_messages_per_audit
     page_size = min(_GRAPH_PAGE_SIZE, target)
 
+    qs = [
+        f"$top={page_size}",
+        "$select=id,subject,from,receivedDateTime,bodyPreview,internetMessageHeaders",
+        "$orderby=receivedDateTime desc",
+    ]
+    if cursor_before:
+        qs.append(f"$filter={quote(f'receivedDateTime lt {cursor_before}')}")
+    url: str | None = f"/me/messages?{'&'.join(qs)}"
     out: list[dict] = []
-    url: str | None = (
-        f"/me/messages?$top={page_size}"
-        "&$select=id,subject,from,receivedDateTime,bodyPreview,internetMessageHeaders"
-    )
 
     while url and len(out) < target:
         resp = await graph.request("GET", url)

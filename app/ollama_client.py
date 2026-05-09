@@ -45,6 +45,11 @@ async def classify(client: httpx.AsyncClient, message: dict) -> dict:
         ),
         "format": "json",
         "stream": False,
+        "options": {
+            "num_ctx": settings.ollama_num_ctx,
+            "temperature": settings.ollama_temperature,
+            "num_predict": settings.ollama_num_predict,
+        },
     }
     try:
         resp = await client.post(
