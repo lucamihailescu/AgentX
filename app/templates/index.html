@@ -18,6 +18,36 @@
     </div>
   </div>
 
+  {% if block_suggestions %}
+    <div class="suggestions-panel">
+      <div class="eyebrow suggestions-head">suggestions · noticed a pattern</div>
+      {% for s in block_suggestions %}
+        <div class="suggestion-row">
+          <div class="suggestion-text">
+            You've deleted <strong>{{ s.deleted }}</strong> message{% if s.deleted != 1 %}s{% endif %}
+            from <code>{{ s.target }}</code>{% if s.unsubscribed %} and unsubscribed {{ s.unsubscribed }} time{% if s.unsubscribed != 1 %}s{% endif %}{% endif %}.
+            Always block?
+          </div>
+          <div class="suggestion-actions">
+            <form action="/ui/suggestions/block" method="post" class="inline"
+                  data-confirm="Always block {{ s.target }} from now on?"
+                  data-confirm-action="Always block">
+              <input type="hidden" name="target" value="{{ s.target }}">
+              <input type="hidden" name="target_type" value="address">
+              <button type="submit" class="small danger">Always block</button>
+            </form>
+            <form action="/ui/suggestions/dismiss" method="post" class="inline">
+              <input type="hidden" name="target" value="{{ s.target }}">
+              <input type="hidden" name="target_type" value="address">
+              <input type="hidden" name="kind" value="block">
+              <button type="submit" class="small ghost">Dismiss</button>
+            </form>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
   {% if tasks %}
     <div class="panel flush">
       <table class="audits-table">

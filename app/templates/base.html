@@ -505,6 +505,45 @@
       background: var(--accent-tint);
     }
 
+    /* ───────── suggestions banner ───────── */
+    .suggestions-panel {
+      border: 1px solid var(--accent);
+      background: linear-gradient(180deg, var(--accent-tint), transparent 80%), var(--surface);
+      border-radius: var(--radius);
+      padding: .85rem 1rem .55rem;
+      margin: 1rem 0 1.25rem;
+    }
+    .suggestions-head {
+      color: var(--accent);
+      margin-bottom: .55rem;
+    }
+    .suggestion-row {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      justify-content: space-between;
+      padding: .45rem 0;
+      border-top: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+      flex-wrap: wrap;
+    }
+    .suggestion-row:first-of-type { border-top: none; }
+    .suggestion-text {
+      font-size: .87rem;
+      color: var(--text);
+      flex: 1 1 320px;
+      min-width: 0;
+    }
+    .suggestion-text code {
+      color: var(--accent);
+      background: transparent;
+      padding: 0;
+    }
+    .suggestion-actions {
+      display: flex;
+      gap: .35rem;
+      flex-shrink: 0;
+    }
+
     pre.box {
       background: var(--surface-2);
       border: 1px solid var(--border);

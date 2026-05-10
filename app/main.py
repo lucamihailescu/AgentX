@@ -24,6 +24,7 @@ from .config import settings
 from .db import init_db
 from . import rules as rules_module
 from . import sender_stats
+from . import suggestions
 from .providers import PROVIDERS, get_provider
 from .providers.base import AuthError
 from .unsubscribe import UnsubscribeError, perform_unsubscribe
@@ -153,11 +154,13 @@ async def index(request: Request):
             (user_id,),
         )
         rows = [dict(r) for r in await cur.fetchall()]
+    block_suggestions = await suggestions.list_block_suggestions(user_id)
     return templates.TemplateResponse(
         "index.html",
         {
             "request": request,
             "tasks": rows,
+            "block_suggestions": block_suggestions,
             "username": request.session.get("username"),
         },
     )
@@ -500,6 +503,33 @@ async def ui_rule_add(request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return RedirectResponse("/ui/rules", status_code=303)
+
+
+@app.post("/ui/suggestions/block")
+async def ui_suggestion_block(request: Request):
+    """Accept a suggestion → create the corresponding deny rule, redirect home."""
+    user_id = _require_user(request)
+    form = await request.form()
+    target = (form.get("target") or "").strip().lower()
+    target_type = form.get("target_type") or "address"
+    if target:
+        try:
+            await rules_module.upsert_rule(user_id, target, target_type, "deny")
+        except ValueError:
+            pass
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/ui/suggestions/dismiss")
+async def ui_suggestion_dismiss(request: Request):
+    user_id = _require_user(request)
+    form = await request.form()
+    target = (form.get("target") or "").strip().lower()
+    target_type = form.get("target_type") or "address"
+    kind = form.get("kind") or "block"
+    if target:
+        await suggestions.dismiss(user_id, target, target_type, kind)
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/ui/rules/delete")

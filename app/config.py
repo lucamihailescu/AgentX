@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     # Comma-separated; parsed into BLOCKED_DOMAINS below. Kept as a raw string
     # to avoid pydantic-settings auto-JSON-decoding it.
     blocked_domains: str = ""
+    suggest_block_threshold: int = 3
+    suggest_max_items: int = 5
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AGENT_", extra="ignore")
 

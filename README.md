@@ -200,6 +200,15 @@ When a task runs, every message whose `from` address matches the blocklist is de
 
 Blocklist matches show up in the report as `auto-deleted` (greyed-out row, no action buttons) and contribute to the `auto_deleted_count` in the summary. If a Graph delete fails (network blip, message already gone), the worker logs a warning and lets the message fall through to normal classification — better to surface a stale match than to fail the whole task.
 
+### Proactive rule suggestions
+
+The home page surfaces a one-click banner when the user has manually deleted or unsubscribed from a sender at least `AGENT_SUGGEST_BLOCK_THRESHOLD` times (default 3). Each suggestion has two actions:
+
+- **Always block** — creates an `address` deny rule (`sender_rules`). Future audits/purges auto-delete from that sender.
+- **Dismiss** — records the dismissal in `suggestion_dismissals` so the same sender doesn't reappear. The user can still add the rule manually later via `/ui/rules`.
+
+Senders that already have any rule (allow or deny) are excluded automatically. Auto-deletes (blocklist or existing deny rule) **don't count** toward the threshold — only user-initiated UI actions, so the suggestions reflect actual user intent rather than the agent's own behavior.
+
 ### Auto-unsubscribe (List-Unsubscribe header)
 
 When fetching messages, the agent expands `$select` to include `internetMessageHeaders`. Per [RFC 2369](https://datatracker.ietf.org/doc/html/rfc2369) and [RFC 8058](https://datatracker.ietf.org/doc/html/rfc8058) it looks for two headers:
@@ -247,6 +256,8 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_OLLAMA_NUM_PREDICT` | `200` | Cap on output tokens per call. JSON verdict is well under 100 tokens. |
 | `AGENT_MAX_MESSAGES_PER_AUDIT` | `200` | Cap on messages fetched per audit. Agent walks `@odata.nextLink` 50 messages at a time up to this number. Use **Next page** on a finished audit to keep walking older mail. |
 | `AGENT_BLOCKED_DOMAINS` | *(empty)* | Comma-separated sender domains whose mail is auto-deleted at fetch time. Subdomain matching enabled. |
+| `AGENT_SUGGEST_BLOCK_THRESHOLD` | `3` | Min combined manual `deleted + unsubscribed` actions against a sender before the home page suggests a deny rule. |
+| `AGENT_SUGGEST_MAX_ITEMS` | `5` | Max suggestions surfaced at once. |
 | `AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES` | *(empty)* | Fallback scheduler interval, in minutes. Used when a user hasn't set their own on `/ui/settings`. Per-user value always wins. |
 | `AGENT_SCHEDULER_TICK_SECONDS` | `60` | How often the scheduler wakes to check whether any user is due. |
 

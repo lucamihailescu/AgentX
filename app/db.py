@@ -51,6 +51,16 @@ CREATE TABLE IF NOT EXISTS sender_stats (
 );
 CREATE INDEX IF NOT EXISTS idx_sender_stats_user ON sender_stats(user_id);
 CREATE INDEX IF NOT EXISTS idx_sender_stats_spam ON sender_stats(user_id, spam DESC, seen DESC);
+
+CREATE TABLE IF NOT EXISTS suggestion_dismissals (
+    user_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    target_type TEXT NOT NULL,         -- 'address' or 'domain'
+    suggestion_kind TEXT NOT NULL,     -- 'block' for v1
+    dismissed_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, target_type, target, suggestion_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_dismissals_user ON suggestion_dismissals(user_id);
 """
 
 _FORWARD_COMPAT_ALTERS = (
