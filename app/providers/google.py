@@ -15,10 +15,14 @@ from urllib.parse import urlencode
 
 import aiosqlite
 
-from ..auth import _decrypt_blob, _encrypt_blob, _now
+import logging
+
+from ..auth import CacheKeyError, _decrypt_blob, _encrypt_blob, _now
 from ..config import settings
 from ..unsubscribe import find_unsubscribe
 from .base import AuthError, MailboxProvider, Message
+
+logger = logging.getLogger(__name__)
 
 _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
@@ -222,6 +226,21 @@ class GoogleProvider(MailboxProvider):
             raise AuthError(f"No cached Google account for {user_id}")
         try:
             return json.loads(_decrypt_blob(row[0]))
+        except CacheKeyError as exc:
+            logger.warning(
+                "Google cache for %s unrecoverable (%s); clearing blob",
+                user_id, exc,
+            )
+            async with aiosqlite.connect(settings.db_path) as db:
+                await db.execute(
+                    "UPDATE users SET cache_blob = '', updated_at = ? "
+                    "WHERE user_id = ?",
+                    (_now(), user_id),
+                )
+                await db.commit()
+            raise AuthError(
+                f"Google cache for {user_id} requires re-sign-in (key rotated)"
+            ) from exc
         except json.JSONDecodeError as exc:
             raise AuthError(f"corrupt Google cache for {user_id}: {exc}") from exc
 

@@ -1,6 +1,11 @@
+import logging
+import re
+
 import aiosqlite
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -72,14 +77,54 @@ _FORWARD_COMPAT_ALTERS = (
 )
 
 
+def _split_statements(script: str) -> list[str]:
+    """Split a SQL script into individual statements on `;` boundaries,
+    stripping `--` line comments and skipping empty fragments. Naive but
+    sufficient for our hand-written schema (no embedded semicolons in strings).
+    """
+    out: list[str] = []
+    for raw in script.split(";"):
+        stripped = "\n".join(
+            line.split("--", 1)[0] for line in raw.splitlines()
+        ).strip()
+        if stripped:
+            out.append(stripped)
+    return out
+
+
+_TABLE_NAME_RE = re.compile(
+    r"create\s+table\s+(?:if\s+not\s+exists\s+)?(\w+)", re.IGNORECASE
+)
+
+
+async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
+    cur = await db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    )
+    row = await cur.fetchone()
+    return row is not None
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(settings.db_path) as db:
-        await db.executescript(SCHEMA)
+        # Run each schema statement individually instead of executescript so
+        # any failure is attributable + we can log new-table creations
+        # explicitly. CREATE TABLE/INDEX IF NOT EXISTS is idempotent.
+        for stmt in _split_statements(SCHEMA):
+            m = _TABLE_NAME_RE.match(stmt)
+            existed_before = (
+                await _table_exists(db, m.group(1)) if m else None
+            )
+            await db.execute(stmt)
+            if m and not existed_before:
+                logger.info("created table %s", m.group(1))
+
         for stmt in _FORWARD_COMPAT_ALTERS:
             try:
                 await db.execute(stmt)
             except aiosqlite.OperationalError:
                 pass  # column already exists
+
         # Migrate any pre-existing hours-based schedules into the minutes column.
         try:
             await db.execute(

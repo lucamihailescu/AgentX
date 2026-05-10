@@ -186,6 +186,17 @@ async def auth_login(provider_name: str, request: Request):
     return RedirectResponse(flow["auth_uri"])
 
 
+@app.get("/auth/callback")
+async def auth_callback_legacy(request: Request):
+    """Backward-compat for the pre-multi-provider redirect URI.
+
+    The original (Microsoft-only) build used `/auth/callback`; existing Entra
+    app registrations still have that as their redirect URI. Delegate to the
+    Microsoft callback handler so users don't have to re-configure Entra.
+    """
+    return await auth_callback("microsoft", request)
+
+
 @app.get("/auth/{provider_name}/callback")
 async def auth_callback(provider_name: str, request: Request):
     flow = request.session.pop("auth_flow", None)

@@ -97,8 +97,16 @@ async def auto_delete(
 async def classify_messages(
     messages: list[dict],
     rules: dict[tuple[str, str], str] | None = None,
+    examples: tuple[list[dict], list[dict]] | None = None,
 ) -> list[dict]:
+    """Run each non-auto-deleted message through Ollama in parallel.
+
+    `examples` is `(ham, spam)` — past-audit examples that get injected as
+    few-shot context for every Ollama call so the model calibrates to the
+    user's actual taste.
+    """
     rules = rules or {}
+    ham_examples, spam_examples = examples or ([], [])
     semaphore = asyncio.Semaphore(settings.ollama_concurrency)
     async with httpx.AsyncClient(base_url=settings.ollama_url) as client:
 
@@ -123,7 +131,12 @@ async def classify_messages(
                     "rule_applied": "deny",
                 }
             async with semaphore:
-                verdict = await classify(client, message)
+                verdict = await classify(
+                    client,
+                    message,
+                    ham_examples=ham_examples,
+                    spam_examples=spam_examples,
+                )
             return {**message, **verdict}
 
         return await asyncio.gather(*(_one(m) for m in messages))

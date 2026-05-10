@@ -34,6 +34,12 @@ class CLITokenError(Exception):
     pass
 
 
+class CacheKeyError(Exception):
+    """Raised when an encrypted cache blob can't be decrypted with the
+    current Fernet key. Implies the cache key has rotated since the blob was
+    written; the user needs to re-sign in."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -58,10 +64,26 @@ def _encrypt_blob(plaintext: str) -> str:
 
 
 def _decrypt_blob(stored: str) -> str:
-    """Decrypt; fall back to raw text so legacy unencrypted rows still work."""
+    """Decrypt the stored cache blob.
+
+    - Success → return the plaintext.
+    - Failure where the value clearly *is* a Fernet token (starts with the
+      version-byte signature ``gAAAA``) → raise ``CacheKeyError``. The key
+      has rotated; returning the ciphertext would cause silent corruption
+      downstream (MSAL would try to JSON-parse it and crash with a useless
+      stack trace).
+    - Failure where the value doesn't look like a Fernet token → assume
+      legacy plaintext written before encryption was added, pass through.
+    """
     try:
         return _cache_cipher().decrypt(stored.encode()).decode()
     except InvalidToken:
+        if stored.startswith("gAAAA"):
+            raise CacheKeyError(
+                "cache blob can't be decrypted with the current key — "
+                "AGENT_SESSION_SECRET or AGENT_CACHE_KEY likely changed; "
+                "user must re-sign in"
+            )
         return stored
 
 

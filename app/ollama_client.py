@@ -12,13 +12,40 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _build_prompt(sender: str | None, subject: str | None, preview: str | None) -> str:
+def _format_example(label: str, ex: dict) -> str:
     return (
-        f"{_SYSTEM_PROMPT}\n\n"
-        f"From: {sender or '(unknown)'}\n"
+        f"\n\n[{label}]\n"
+        f"  From: {ex.get('from') or '(unknown)'}\n"
+        f"  Subject: {ex.get('subject') or '(no subject)'}\n"
+        f"  Preview: {ex.get('preview') or ''}"
+    )
+
+
+def _build_prompt(
+    sender: str | None,
+    subject: str | None,
+    preview: str | None,
+    *,
+    ham_examples: list[dict] | None = None,
+    spam_examples: list[dict] | None = None,
+) -> str:
+    parts: list[str] = [_SYSTEM_PROMPT]
+    if ham_examples or spam_examples:
+        parts.append(
+            "\n\nUse these previously-classified examples from this user's "
+            "history as guidance — calibrate the verdict to match their taste:"
+        )
+        for ex in spam_examples or []:
+            parts.append(_format_example("SPAM", ex))
+        for ex in ham_examples or []:
+            parts.append(_format_example("NOT SPAM", ex))
+        parts.append("\n\nNow classify this new email:")
+    parts.append(
+        f"\n\nFrom: {sender or '(unknown)'}\n"
         f"Subject: {subject or '(no subject)'}\n"
         f"Preview: {(preview or '').strip()}"
     )
+    return "".join(parts)
 
 
 def _coerce_bool(value: object) -> bool | None:
@@ -35,13 +62,27 @@ def _coerce_confidence(value: object) -> float | None:
     return None
 
 
-async def classify(client: httpx.AsyncClient, message: dict) -> dict:
+async def classify(
+    client: httpx.AsyncClient,
+    message: dict,
+    *,
+    ham_examples: list[dict] | None = None,
+    spam_examples: list[dict] | None = None,
+) -> dict:
     """Return {spam, confidence, reason}. On any failure return spam=None with
-    the failure reason — the per-message verdict is best-effort."""
+    the failure reason — the per-message verdict is best-effort.
+
+    Pass `ham_examples` / `spam_examples` to inject few-shot context drawn
+    from the user's prior verdicts.
+    """
     payload = {
         "model": settings.ollama_model,
         "prompt": _build_prompt(
-            message.get("from"), message.get("subject"), message.get("preview")
+            message.get("from"),
+            message.get("subject"),
+            message.get("preview"),
+            ham_examples=ham_examples,
+            spam_examples=spam_examples,
         ),
         "format": "json",
         "stream": False,

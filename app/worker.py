@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import aiosqlite
 
 from .config import settings
+from . import feedback
 from .providers import get_provider
 from .providers.base import AuthError
 from .rules import load_rule_index
@@ -89,8 +90,16 @@ class Worker:
             provider, user_id, cursor_before=cursor_before
         )
         rules = await load_rule_index(user_id)
+        examples = await feedback.collect_examples(
+            user_id, settings.ollama_examples_per_class
+        )
+        if examples[0] or examples[1]:
+            logger.info(
+                "audit %s using %d ham + %d spam few-shot examples",
+                task_id, len(examples[0]), len(examples[1]),
+            )
         messages = await auto_delete(provider, user_id, messages, rules)
-        classified = await classify_messages(messages, rules)
+        classified = await classify_messages(messages, rules, examples=examples)
         report = await generate_report(classified)
         await self._update(task_id, status="completed", result_data=json.dumps(report))
         await sender_stats.record_audit_completion(user_id, report)

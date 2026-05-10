@@ -168,6 +168,21 @@ Each Graph call goes through `GraphClient`, which invokes `acquire_access_token(
 
 ### Spam classification
 
+`app/ollama_client.py` posts each message's sender / subject / preview to Ollama's `/api/generate` endpoint, and — when the user has any audit history — prepends a few-shot block of past examples drawn from `app/feedback.py`. The model is asked to "calibrate the verdict to match the user's taste."
+
+**Few-shot signals.** `feedback.collect_examples` walks the most recent ~30 completed audits (deduped by sender) and labels messages from explicit user feedback only:
+
+| signal in past audit | label fed to model |
+| --- | --- |
+| `rule_applied == "deny"` | spam |
+| `rule_applied == "allow"` | ham |
+| `auto_deleted` (matched a blocklist or deny rule) | spam |
+| `deleted` AND `spam == True` (user agreed with the model) | spam |
+| `unsubscribed` (active "get me out") | spam |
+| anything else (skipped, unread, just sitting there) | *not used* — too ambiguous |
+
+Tune via `AGENT_OLLAMA_EXAMPLES_PER_CLASS` (default 3 per class, capped to fit the default `num_ctx=1024`). Set to `0` to revert to the fixed prompt.
+
 `app/ollama_client.py` posts each message's sender / subject / preview to Ollama's `/api/generate` endpoint. The system prompt instructs the model to reply with a single JSON object:
 
 ```json
@@ -265,6 +280,7 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_OLLAMA_NUM_CTX` | `1024` | Ollama context window (`num_ctx`). Each prompt is ~200–300 tokens so 1024 is comfortable headroom. |
 | `AGENT_OLLAMA_TEMPERATURE` | `0.0` | Classifier sampling temperature. `0` = deterministic verdicts. |
 | `AGENT_OLLAMA_NUM_PREDICT` | `200` | Cap on output tokens per call. JSON verdict is well under 100 tokens. |
+| `AGENT_OLLAMA_EXAMPLES_PER_CLASS` | `3` | Number of few-shot examples per class (spam + ham) drawn from past audits. `0` disables few-shot prompting. Each example ≈ 80 tokens; with `num_ctx=1024`, stay ≤ 4. |
 | `AGENT_MAX_MESSAGES_PER_AUDIT` | `200` | Cap on messages fetched per audit. Agent walks `@odata.nextLink` 50 messages at a time up to this number. Use **Next page** on a finished audit to keep walking older mail. |
 | `AGENT_BLOCKED_DOMAINS` | *(empty)* | Comma-separated sender domains whose mail is auto-deleted at fetch time. Subdomain matching enabled. |
 | `AGENT_SUGGEST_BLOCK_THRESHOLD` | `3` | Min combined manual `deleted + unsubscribed` actions against a sender before the home page suggests a deny rule. |

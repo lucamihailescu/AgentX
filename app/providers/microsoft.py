@@ -10,10 +10,14 @@ from urllib.parse import quote
 import aiosqlite
 import msal
 
-from ..auth import _decrypt_blob, _encrypt_blob, _now
+import logging
+
+from ..auth import CacheKeyError, _decrypt_blob, _encrypt_blob, _now
 from ..config import settings
 from ..unsubscribe import find_unsubscribe
 from .base import AuthError, MailboxProvider, Message
+
+logger = logging.getLogger(__name__)
 
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 _PAGE_SIZE = 50
@@ -46,8 +50,24 @@ class MicrosoftProvider(MailboxProvider):
                 "SELECT cache_blob FROM users WHERE user_id = ?", (user_id,)
             )
             row = await cur.fetchone()
-        if row:
+        if not row:
+            return cache
+        try:
             cache.deserialize(_decrypt_blob(row[0]))
+        except CacheKeyError as exc:
+            # Cache key rotated; the blob is unrecoverable. Wipe so future
+            # sign-ins start clean and we don't keep logging this.
+            logger.warning(
+                "Microsoft cache for %s unrecoverable (%s); clearing blob",
+                user_id, exc,
+            )
+            async with aiosqlite.connect(settings.db_path) as db:
+                await db.execute(
+                    "UPDATE users SET cache_blob = '', updated_at = ? "
+                    "WHERE user_id = ?",
+                    (_now(), user_id),
+                )
+                await db.commit()
         return cache
 
     @classmethod
