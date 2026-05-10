@@ -41,7 +41,15 @@ def _now() -> str:
 # ── cache encryption ──────────────────────────────────────────────────────
 @lru_cache(maxsize=1)
 def _cache_cipher() -> Fernet:
-    digest = hashlib.sha256(("cache:" + settings.session_secret).encode()).digest()
+    """Derive the Fernet key for the encrypted token cache.
+
+    Prefers `AGENT_CACHE_KEY` (when set) so it can be rotated independently
+    from the session-cookie signing secret. Falls back to deriving from
+    `SESSION_SECRET` for backward compatibility — but that path means
+    rotating session_secret invalidates every user's stored tokens.
+    """
+    secret = settings.cache_key or settings.session_secret
+    digest = hashlib.sha256(("cache:" + secret).encode()).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
 
 

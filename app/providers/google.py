@@ -13,7 +13,6 @@ from typing import ClassVar
 from urllib.parse import urlencode
 
 import aiosqlite
-import httpx
 
 from ..auth import _decrypt_blob, _encrypt_blob, _now
 from ..config import settings
@@ -159,18 +158,18 @@ class GoogleProvider(MailboxProvider):
         if not code:
             raise AuthError("authorization code missing from callback")
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                _TOKEN_ENDPOINT,
-                data={
-                    "code": code,
-                    "client_id": settings.google_client_id,
-                    "client_secret": settings.google_client_secret,
-                    "redirect_uri": flow["redirect_uri"],
-                    "grant_type": "authorization_code",
-                    "code_verifier": flow["code_verifier"],
-                },
-            )
+        resp = await cls.request_with_retry(
+            "POST",
+            _TOKEN_ENDPOINT,
+            data={
+                "code": code,
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "redirect_uri": flow["redirect_uri"],
+                "grant_type": "authorization_code",
+                "code_verifier": flow["code_verifier"],
+            },
+        )
         if resp.status_code >= 400:
             raise AuthError(f"token exchange failed: {resp.text[:200]}")
         token = resp.json()
@@ -212,16 +211,16 @@ class GoogleProvider(MailboxProvider):
             return blob["access_token"]
 
         # Refresh
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                _TOKEN_ENDPOINT,
-                data={
-                    "client_id": settings.google_client_id,
-                    "client_secret": settings.google_client_secret,
-                    "refresh_token": blob["refresh_token"],
-                    "grant_type": "refresh_token",
-                },
-            )
+        resp = await cls.request_with_retry(
+            "POST",
+            _TOKEN_ENDPOINT,
+            data={
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "refresh_token": blob["refresh_token"],
+                "grant_type": "refresh_token",
+            },
+        )
         if resp.status_code >= 400:
             raise AuthError(f"refresh failed: {resp.text[:200]}")
         refreshed = resp.json()
@@ -257,35 +256,35 @@ class GoogleProvider(MailboxProvider):
         # 1) list IDs (with optional date filter)
         ids: list[str] = []
         page_token: str | None = None
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            while len(ids) < limit:
-                params: dict[str, str | int] = {
-                    "maxResults": min(_PAGE_SIZE, limit - len(ids)),
-                    "labelIds": "INBOX",
-                }
-                if cursor_before:
-                    epoch = _iso_to_epoch_seconds(cursor_before)
-                    if epoch is not None:
-                        params["q"] = f"before:{epoch}"
-                if page_token:
-                    params["pageToken"] = page_token
-                resp = await client.get(
-                    f"{_GMAIL_BASE}/users/me/messages",
-                    headers=headers,
-                    params=params,
+        while len(ids) < limit:
+            params: dict[str, str | int] = {
+                "maxResults": min(_PAGE_SIZE, limit - len(ids)),
+                "labelIds": "INBOX",
+            }
+            if cursor_before:
+                epoch = _iso_to_epoch_seconds(cursor_before)
+                if epoch is not None:
+                    params["q"] = f"before:{epoch}"
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await cls.request_with_retry(
+                "GET",
+                f"{_GMAIL_BASE}/users/me/messages",
+                headers=headers,
+                params=params,
+            )
+            if resp.status_code >= 400:
+                raise AuthError(
+                    f"Gmail list returned {resp.status_code}: {resp.text[:200]}"
                 )
-                if resp.status_code >= 400:
-                    raise AuthError(
-                        f"Gmail list returned {resp.status_code}: {resp.text[:200]}"
-                    )
-                body = resp.json()
-                for m in body.get("messages", []):
-                    ids.append(m["id"])
-                    if len(ids) >= limit:
-                        break
-                page_token = body.get("nextPageToken")
-                if not page_token:
+            body = resp.json()
+            for m in body.get("messages", []):
+                ids.append(m["id"])
+                if len(ids) >= limit:
                     break
+            page_token = body.get("nextPageToken")
+            if not page_token:
+                break
 
         if not ids:
             return []
@@ -293,12 +292,13 @@ class GoogleProvider(MailboxProvider):
         # 2) hydrate metadata for each id with bounded concurrency
         sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
 
-        async def _fetch_one(client: httpx.AsyncClient, mid: str) -> Message | None:
+        async def _fetch_one(mid: str) -> Message | None:
             params = [("format", "metadata")]
             for h in _METADATA_HEADERS:
                 params.append(("metadataHeaders", h))
             async with sem:
-                resp = await client.get(
+                resp = await cls.request_with_retry(
+                    "GET",
                     f"{_GMAIL_BASE}/users/me/messages/{mid}",
                     headers=headers,
                     params=params,
@@ -335,10 +335,7 @@ class GoogleProvider(MailboxProvider):
                 unsubscribe_one_click=unsub["one_click"] if unsub else False,
             )
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            results = await asyncio.gather(
-                *(_fetch_one(client, mid) for mid in ids)
-            )
+        results = await asyncio.gather(*(_fetch_one(mid) for mid in ids))
         return [m for m in results if m is not None]
 
     @classmethod
@@ -346,12 +343,12 @@ class GoogleProvider(MailboxProvider):
         # Gmail equivalent of "move to Deleted Items" is messages.trash.
         # `messages.delete` is permanent; we want recoverable.
         token = await cls.acquire_access_token(user_id)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{_GMAIL_BASE}/users/me/messages/{message_id}/trash",
-                headers={"Authorization": f"Bearer {token}"},
+        resp = await cls.request_with_retry(
+            "POST",
+            f"{_GMAIL_BASE}/users/me/messages/{message_id}/trash",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Gmail trash returned {resp.status_code}: {resp.text[:200]}"
             )
-            if resp.status_code >= 400:
-                raise AuthError(
-                    f"Gmail trash returned {resp.status_code}: {resp.text[:200]}"
-                )

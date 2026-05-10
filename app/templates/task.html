@@ -9,7 +9,10 @@
   <div class="page-head">
     <div>
       <div class="eyebrow"><a class="plain" href="/">← all audits</a></div>
-      <h1>Audit <span class="taskid">{{ task.task_id[:8] }}</span>.</h1>
+      <h1>
+        {% if task.kind == 'purge' %}Cleanup{% else %}Audit{% endif %}
+        <span class="taskid">{{ task.task_id[:8] }}</span>.
+      </h1>
     </div>
     <div class="actions">
       <span class="pill {{ task.status }}">{{ task.status }}</span>
@@ -27,6 +30,81 @@
       &nbsp;·&nbsp; <span class="ar">auto-refreshing every 2s</span>
     {% endif %}
   </p>
+
+  {% if task.kind == 'purge' %}
+    {% if not task.result %}
+      <div class="panel">
+        <div class="empty">Queued — walking the mailbox shortly…</div>
+      </div>
+    {% else %}
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Pages walked</div>
+        <div class="stat-value">{{ task.result.pages_walked or 0 }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Messages scanned</div>
+        <div class="stat-value">{{ task.result.messages_seen or 0 }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Deleted</div>
+        <div class="stat-value spam">{{ task.result.messages_deleted or 0 }}</div>
+      </div>
+    </div>
+
+    {% if task.result.deleted_messages %}
+      <p class="meta" style="margin: 0 0 .75rem">
+        <span class="eyebrow inline">deleted</span>&nbsp;
+        showing first {{ task.result.deleted_messages | length }} of
+        {{ task.result.messages_deleted }}
+      </p>
+      <div class="panel flush">
+        <table class="audit-table">
+          <thead>
+            <tr>
+              <th style="width: 110px">source</th>
+              <th style="width: 220px">from</th>
+              <th>subject</th>
+              <th style="width: 170px">received</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in task.result.deleted_messages %}
+              <tr class="deleted-row">
+                <td>
+                  {% if m.rule_applied == 'deny' %}
+                    <span class="pill spam">deny rule</span>
+                  {% else %}
+                    <span class="pill muted">blocklist</span>
+                  {% endif %}
+                </td>
+                <td><code class="from">{{ m.from or '—' }}</code></td>
+                <td class="subject">{{ m.subject or '(no subject)' }}</td>
+                <td class="meta received">{{ m.received or '' }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="panel">
+        <div class="empty">
+          {% if task.status == 'completed' %}
+            Nothing matched — your blocklist + deny rules left every message untouched.
+          {% else %}
+            Walking the mailbox…
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+
+    <details class="raw" style="margin-top: 2rem">
+      <summary>raw json</summary>
+      <pre class="box">{{ raw_json }}</pre>
+    </details>
+    {% endif %}{# /purge has-result #}
+
+  {% else %}
 
   {% if task.status == 'completed' and task.result and task.result.message_count > 0 %}
     {% set received_dates = task.result.messages | map(attribute='received') | select | list %}
@@ -199,6 +277,7 @@
       <pre class="box">{{ raw_json }}</pre>
     </details>
   {% endif %}
+  {% endif %}{# /audit-vs-purge branch #}
 
   <script>
     (() => {

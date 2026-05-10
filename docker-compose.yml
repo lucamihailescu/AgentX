@@ -19,6 +19,7 @@ services:
       AGENT_GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       AGENT_GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8080/auth/google/callback}
       AGENT_SESSION_SECRET: ${SESSION_SECRET}
+      AGENT_CACHE_KEY: ${CACHE_KEY:-}
       AGENT_DB_PATH: /data/tasks.db
       AGENT_OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       AGENT_OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}

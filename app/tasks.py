@@ -129,6 +129,76 @@ async def classify_messages(
         return await asyncio.gather(*(_one(m) for m in messages))
 
 
+async def purge_mailbox(
+    provider: type[MailboxProvider],
+    user_id: str,
+    rules: dict[tuple[str, str], str] | None,
+    *,
+    on_progress=None,
+) -> dict:
+    """Walk the entire mailbox in cursor-paginated batches and auto-delete
+    every message that matches `BLOCKED_DOMAINS` or a `deny` rule.
+
+    No Ollama, no per-message classification — this is the "I just want my
+    rules applied to everything" pass. Calls `on_progress(snapshot)` after
+    each page so the worker can stream incremental progress to the UI.
+    """
+    rules = rules or {}
+    summary: dict = {
+        "kind": "purge",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "pages_walked": 0,
+        "messages_seen": 0,
+        "messages_deleted": 0,
+        "deleted_messages": [],
+        "in_progress": True,
+    }
+
+    cursor: str | None = None
+    last_cursor: object = object()  # sentinel
+
+    while True:
+        if cursor == last_cursor:
+            # No progress (boundary collision on identical timestamps).
+            break
+        last_cursor = cursor
+
+        messages = await fetch_messages(provider, user_id, cursor_before=cursor)
+        if not messages:
+            break
+
+        summary["pages_walked"] += 1
+        summary["messages_seen"] += len(messages)
+
+        processed = await auto_delete(provider, user_id, messages, rules)
+        for m in processed:
+            if m.get("auto_deleted"):
+                summary["messages_deleted"] += 1
+                # Cap the captured list to keep result_data manageable for huge
+                # mailboxes; the count is still authoritative.
+                if len(summary["deleted_messages"]) < 1000:
+                    summary["deleted_messages"].append({
+                        "from": m.get("from"),
+                        "subject": m.get("subject"),
+                        "received": m.get("received"),
+                        "rule_applied": m.get("rule_applied") or "blocklist",
+                    })
+
+        if on_progress is not None:
+            await on_progress(summary)
+
+        receiveds = [m["received"] for m in processed if m.get("received")]
+        if not receiveds:
+            break
+        cursor = min(receiveds)
+
+    summary["in_progress"] = False
+    summary["finished_at"] = datetime.now(timezone.utc).isoformat()
+    if on_progress is not None:
+        await on_progress(summary)
+    return summary
+
+
 async def generate_report(classified: list[dict]) -> dict:
     spam_count = sum(1 for m in classified if m.get("spam") is True)
     auto_deleted_count = sum(1 for m in classified if m.get("auto_deleted"))

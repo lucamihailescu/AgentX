@@ -10,7 +10,14 @@ from .config import settings
 from .providers import get_provider
 from .providers.base import AuthError
 from .rules import load_rule_index
-from .tasks import auto_delete, classify_messages, fetch_messages, generate_report
+from . import sender_stats
+from .tasks import (
+    auto_delete,
+    classify_messages,
+    fetch_messages,
+    generate_report,
+    purge_mailbox,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +49,7 @@ class Worker:
         async with aiosqlite.connect(settings.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                """SELECT t.task_id, t.user_id, t.cursor_before, u.provider
+                """SELECT t.task_id, t.user_id, t.cursor_before, t.kind, u.provider
                    FROM tasks t JOIN users u ON t.user_id = u.user_id
                    WHERE t.status = 'queued' ORDER BY t.created_at LIMIT 1"""
             )
@@ -58,29 +65,55 @@ class Worker:
 
     async def _process(self, task: dict) -> None:
         task_id = task["task_id"]
-        user_id = task["user_id"]
-        cursor_before = task.get("cursor_before")
         try:
             provider = get_provider(task.get("provider"))
         except ValueError as exc:
             await self._update(task_id, status="failed", error=f"Provider: {exc}")
             return
         try:
-            messages = await fetch_messages(
-                provider, user_id, cursor_before=cursor_before
-            )
-            rules = await load_rule_index(user_id)
-            messages = await auto_delete(provider, user_id, messages, rules)
-            classified = await classify_messages(messages, rules)
-            report = await generate_report(classified)
-            await self._update(
-                task_id, status="completed", result_data=json.dumps(report)
-            )
+            if task.get("kind") == "purge":
+                await self._process_purge(task, provider)
+            else:
+                await self._process_audit(task, provider)
         except AuthError as exc:
             await self._update(task_id, status="failed", error=f"Auth: {exc}")
         except Exception as exc:
             logger.exception("Task %s failed", task_id)
             await self._update(task_id, status="failed", error=str(exc))
+
+    async def _process_audit(self, task: dict, provider) -> None:
+        task_id = task["task_id"]
+        user_id = task["user_id"]
+        cursor_before = task.get("cursor_before")
+        messages = await fetch_messages(
+            provider, user_id, cursor_before=cursor_before
+        )
+        rules = await load_rule_index(user_id)
+        messages = await auto_delete(provider, user_id, messages, rules)
+        classified = await classify_messages(messages, rules)
+        report = await generate_report(classified)
+        await self._update(task_id, status="completed", result_data=json.dumps(report))
+        await sender_stats.record_audit_completion(user_id, report)
+
+    async def _process_purge(self, task: dict, provider) -> None:
+        task_id = task["task_id"]
+        user_id = task["user_id"]
+        rules = await load_rule_index(user_id)
+
+        async def on_progress(snapshot: dict) -> None:
+            await self._update(
+                task_id, status="processing", result_data=json.dumps(snapshot)
+            )
+
+        summary = await purge_mailbox(
+            provider, user_id, rules, on_progress=on_progress
+        )
+        await self._update(
+            task_id, status="completed", result_data=json.dumps(summary)
+        )
+        # Bump per-sender counters from the purge's deletions.
+        for m in summary.get("deleted_messages", []):
+            await sender_stats.bump_action(user_id, m.get("from"), deleted=1)
 
     @staticmethod
     async def _update(

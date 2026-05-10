@@ -44,7 +44,8 @@ So this codebase drops the sidecar and goes straight to MSAL. The "long-running"
 | `app/ollama_client.py` | Async client for `POST {OLLAMA_URL}/api/generate` with `format=json`; defensive parsing |
 | `app/worker.py` | Two background loops: `Worker` claims queued rows and runs the pipeline; `Scheduler` queues new audits per user on a configurable interval |
 | `app/templates/` | Jinja2 templates: `base.html`, `login.html`, `index.html`, `task.html`, `rules.html`, `senders.html`, `settings.html` |
-| `app/db.py` | SQLite schema (`users`, `tasks`, `sender_rules`); idempotent ALTERs for forward-compat |
+| `app/sender_stats.py` | Per-user / per-domain aggregate counters (precomputed by the worker; bumped on user actions) — backs `/ui/senders` with a single indexed SELECT instead of scanning every audit's JSON. |
+| `app/db.py` | SQLite schema (`users`, `tasks`, `sender_rules`, `sender_stats`); idempotent ALTERs for forward-compat |
 | `app/config.py` | Pydantic settings loaded from `AGENT_*` env vars |
 
 The agent's stable per-user identifier is MSAL's `home_account_id` — used as the FK on `tasks.user_id` and as the payload in the CLI bearer token.
@@ -277,7 +278,9 @@ This pairs naturally with rules + the domain blocklist: once you've trained the 
 ## Limitations
 
 - **Refresh-token lifetime for personal accounts is set by Microsoft**, sliding ~24h with a 90-day cap. There's no `TokenLifetimePolicy` knob — plan tasks for hours-to-low-days, not weeks.
-- **Token cache is encrypted at rest** with a Fernet key derived from `SESSION_SECRET`. Rotating the secret invalidates all stored caches (forcing re-sign-in), which is the safe default — but you don't get cross-host portability for free. Move to a KMS-backed key if you need that.
+- **Token cache is encrypted at rest** with a Fernet key derived from `AGENT_CACHE_KEY` (when set) or `SESSION_SECRET` as a fallback. Setting `AGENT_CACHE_KEY` separately means you can rotate `SESSION_SECRET` without invalidating stored tokens. Move to a KMS-backed key for production.
+- **Resilience to API throttling**: every Graph / Gmail call is wrapped in `request_with_retry` (5 attempts, exponential backoff with jitter, honors `Retry-After`) so a transient 429 won't fail an audit. Each provider keeps a long-lived `httpx.AsyncClient` so paginated fetches and bulk deletes reuse the connection pool.
+- **`/ui/senders`** reads from a precomputed `sender_stats` table (updated by the worker on each completed audit, and bumped from user actions like delete/unsubscribe). Earlier versions scanned every audit's JSON on each request — slow as audits accumulated.
 - **Single worker.** `_claim_next` does a non-locking `SELECT … LIMIT 1` followed by an `UPDATE`. To scale out, swap SQLite for Postgres and use `SELECT … FOR UPDATE SKIP LOCKED`.
 - **No retry budget** beyond what MSAL/HTTPX do internally — failures mark the task `failed` and stop. Add a retry counter on the `tasks` row if you need it.
 - **CLI tokens carry full user authority** for 1 hour. Treat them like passwords; don't paste into chat or log them.

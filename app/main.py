@@ -23,6 +23,7 @@ from .auth import (
 from .config import settings
 from .db import init_db
 from . import rules as rules_module
+from . import sender_stats
 from .providers import PROVIDERS, get_provider
 from .providers.base import AuthError
 from .unsubscribe import UnsubscribeError, perform_unsubscribe
@@ -66,6 +67,8 @@ async def lifespan(app: FastAPI):
         for t in (worker_task, scheduler_task):
             t.cancel()
         await asyncio.gather(worker_task, scheduler_task, return_exceptions=True)
+        for p in PROVIDERS.values():
+            await p.aclose()
 
 
 app = FastAPI(title="agentx — multi-provider mailbox agent", lifespan=lifespan)
@@ -98,15 +101,19 @@ async def _user_provider(user_id: str):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-async def _insert_task(user_id: str, cursor_before: str | None = None) -> str:
+async def _insert_task(
+    user_id: str,
+    cursor_before: str | None = None,
+    kind: str = "audit",
+) -> str:
     task_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(settings.db_path) as db:
         await db.execute(
             """INSERT INTO tasks
-               (task_id, user_id, status, cursor_before, created_at, updated_at)
-               VALUES (?, ?, 'queued', ?, ?, ?)""",
-            (task_id, user_id, cursor_before, now, now),
+               (task_id, user_id, kind, status, cursor_before, created_at, updated_at)
+               VALUES (?, ?, ?, 'queued', ?, ?, ?)""",
+            (task_id, user_id, kind, cursor_before, now, now),
         )
         await db.commit()
     return task_id
@@ -140,7 +147,7 @@ async def index(request: Request):
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            """SELECT task_id, status, cursor_before, created_at, updated_at
+            """SELECT task_id, kind, status, cursor_before, created_at, updated_at
                FROM tasks WHERE user_id = ?
                ORDER BY created_at DESC LIMIT 10""",
             (user_id,),
@@ -224,6 +231,13 @@ async def ui_create_task(request: Request):
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
+@app.post("/ui/tasks/purge")
+async def ui_create_purge(request: Request):
+    user_id = _require_user(request)
+    task_id = await _insert_task(user_id, kind="purge")
+    return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+
+
 @app.get("/ui/tasks/{task_id}", response_class=HTMLResponse)
 async def ui_task_detail(task_id: str, request: Request):
     user_id = _require_user(request)
@@ -293,6 +307,7 @@ async def ui_delete_message(task_id: str, message_id: str, request: Request):
     target["deleted"] = True
     target["deleted_at"] = datetime.now(timezone.utc).isoformat()
     await _save_result(task_id, task["result"])
+    await sender_stats.bump_action(user_id, target.get("from"), deleted=1)
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
@@ -305,6 +320,7 @@ async def ui_unsubscribe_message(task_id: str, message_id: str, request: Request
         return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
     await _do_unsubscribe(target)
     await _save_result(task_id, task["result"])
+    await sender_stats.bump_action(user_id, target.get("from"), unsubscribed=1)
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
@@ -357,9 +373,14 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
                 target["spam"] = False
                 target["reason"] = "allowlisted sender"
 
+    bumps: list[tuple[str | None, int, int]] = []  # (sender, deleted, unsub)
+
     async def _process(target: dict) -> None:
         if not target.get("id"):
             return
+        sender = target.get("from")
+        bumped_unsub = 0
+        bumped_del = 0
         async with semaphore:
             if (
                 do_unsub
@@ -373,6 +394,7 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
                     )
                     target["unsubscribed"] = True
                     target["unsubscribed_at"] = datetime.now(timezone.utc).isoformat()
+                    bumped_unsub = 1
                 except UnsubscribeError as exc:
                     logger.warning("bulk unsub failed for %s: %s", target["id"], exc)
 
@@ -381,11 +403,16 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
                     await provider.delete_message(user_id, target["id"])
                     target["deleted"] = True
                     target["deleted_at"] = datetime.now(timezone.utc).isoformat()
+                    bumped_del = 1
                 except AuthError as exc:
                     logger.warning("bulk delete failed for %s: %s", target["id"], exc)
+        if bumped_del or bumped_unsub:
+            bumps.append((sender, bumped_del, bumped_unsub))
 
     await asyncio.gather(*(_process(t) for t in targets))
     await _save_result(task_id, task["result"])
+    for sender, d, u in bumps:
+        await sender_stats.bump_action(user_id, sender, deleted=d, unsubscribed=u)
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
@@ -405,6 +432,7 @@ async def ui_set_rule(task_id: str, message_id: str, verdict: str, request: Requ
         raise HTTPException(status_code=400, detail=str(exc))
 
     target["rule_applied"] = verdict
+    bumped_delete = 0
     if verdict == "allow":
         target["spam"] = False
         target["reason"] = "allowlisted sender"
@@ -413,9 +441,12 @@ async def ui_set_rule(task_id: str, message_id: str, verdict: str, request: Requ
             await _delete_message(user_id, message_id)
             target["deleted"] = True
             target["deleted_at"] = datetime.now(timezone.utc).isoformat()
+            bumped_delete = 1
         target["reason"] = "denylisted sender"
 
     await _save_result(task_id, task["result"])
+    if bumped_delete:
+        await sender_stats.bump_action(user_id, sender, deleted=1)
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
@@ -423,73 +454,19 @@ async def ui_set_rule(task_id: str, message_id: str, verdict: str, request: Requ
 @app.get("/ui/senders", response_class=HTMLResponse)
 async def ui_senders(request: Request):
     user_id = _require_user(request)
-
-    senders: dict[str, dict] = {}
-    domains: dict[str, dict] = {}
-
-    async with aiosqlite.connect(settings.db_path) as db:
-        cur = await db.execute(
-            "SELECT result_data FROM tasks "
-            "WHERE user_id = ? AND result_data IS NOT NULL",
-            (user_id,),
-        )
-        rows = await cur.fetchall()
-
-    def _bucket(target: dict, m: dict) -> None:
-        target["seen"] += 1
-        if m.get("spam") is True:
-            target["spam"] += 1
-        if m.get("deleted"):
-            target["deleted"] += 1
-        if m.get("unsubscribed"):
-            target["unsubscribed"] += 1
-        if m.get("auto_deleted"):
-            target["auto_deleted"] += 1
-        if m.get("received") and (
-            target["last_seen"] is None or m["received"] > target["last_seen"]
-        ):
-            target["last_seen"] = m["received"]
-
-    def _empty(name: str) -> dict:
-        return {
-            "target": name,
-            "seen": 0,
-            "spam": 0,
-            "deleted": 0,
-            "unsubscribed": 0,
-            "auto_deleted": 0,
-            "last_seen": None,
-        }
-
-    for (raw,) in rows:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        for m in data.get("messages", []):
-            sender = (m.get("from") or "").strip().lower()
-            if not sender:
-                continue
-            _bucket(senders.setdefault(sender, _empty(sender)), m)
-            if "@" in sender:
-                domain = sender.split("@", 1)[-1]
-                _bucket(domains.setdefault(domain, _empty(domain)), m)
-
+    senders_rows = await sender_stats.list_top(user_id, "address", limit=100)
+    domains_rows = await sender_stats.list_top(user_id, "domain", limit=50)
     rule_index = await rules_module.load_rule_index(user_id)
-    for s in senders.values():
-        s["rule"] = rule_index.get(("address", s["target"]))
-    for d in domains.values():
-        d["rule"] = rule_index.get(("domain", d["target"]))
-
-    senders_sorted = sorted(senders.values(), key=lambda s: (-s["spam"], -s["seen"]))[:100]
-    domains_sorted = sorted(domains.values(), key=lambda d: (-d["spam"], -d["seen"]))[:50]
-
+    for r in senders_rows:
+        r["rule"] = rule_index.get(("address", r["target"]))
+    for r in domains_rows:
+        r["rule"] = rule_index.get(("domain", r["target"]))
     return templates.TemplateResponse(
         "senders.html",
         {
             "request": request,
-            "senders": senders_sorted,
-            "domains": domains_sorted,
+            "senders": senders_rows,
+            "domains": domains_rows,
             "username": request.session.get("username"),
         },
     )
@@ -543,12 +520,17 @@ async def ui_unsubscribe_and_delete(task_id: str, message_id: str, request: Requ
     target = _find_message(task, message_id)
     if target.get("deleted"):
         return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+    bumped_unsub = 0
     if not target.get("unsubscribed"):
         await _do_unsubscribe(target)
+        bumped_unsub = 1
     await _delete_message(user_id, message_id)
     target["deleted"] = True
     target["deleted_at"] = datetime.now(timezone.utc).isoformat()
     await _save_result(task_id, task["result"])
+    await sender_stats.bump_action(
+        user_id, target.get("from"), deleted=1, unsubscribed=bumped_unsub
+    )
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 

@@ -7,6 +7,11 @@
       <h1>Mailbox <em>audits</em>.</h1>
     </div>
     <div class="actions">
+      <form action="/ui/tasks/purge" method="post" class="inline"
+            data-confirm="Walk the entire mailbox and apply blocklist + deny rules?"
+            data-confirm-action="Run cleanup">
+        <button type="submit">Run cleanup</button>
+      </form>
       <form action="/ui/tasks" method="post" class="inline">
         <button type="submit" class="primary">+ Generate new audit</button>
       </form>
@@ -28,6 +33,9 @@
             <tr class="clickable-row" data-href="/ui/tasks/{{ t.task_id }}">
               <td>
                 <code>{{ t.task_id[:8] }}</code>
+                {% if t.kind == 'purge' %}
+                  <span class="pill muted" style="margin-left: .5rem">cleanup</span>
+                {% endif %}
                 {% if t.cursor_before %}
                   <div class="meta mono" style="font-size: .68rem; margin-top: .15rem">before {{ t.cursor_before }}</div>
                 {% endif %}

@@ -8,8 +8,15 @@ normalized `Message` dataclass.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import random
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
+
+import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class AuthError(Exception):
@@ -51,10 +58,92 @@ class MailboxProvider:
     NAME: ClassVar[str] = ""
     DISPLAY_NAME: ClassVar[str] = ""
 
+    # Lazy-initialized per subclass. Each subclass gets its own instance the
+    # first time `http_client()` is called (because cls is the subclass and
+    # the assignment lands on the subclass attribute).
+    _client: ClassVar[httpx.AsyncClient | None] = None
+
     @classmethod
     def is_configured(cls) -> bool:
         """Return True if the env has the credentials needed to use this provider."""
         return False
+
+    # ── shared http plumbing ──────────────────────────────────────────────
+    @classmethod
+    def http_client(cls) -> httpx.AsyncClient:
+        """Long-lived `httpx.AsyncClient` for this provider.
+
+        Reuses the underlying connection pool across all calls (paginated
+        fetches, bulk deletes), which avoids a TLS handshake per request.
+        """
+        if cls._client is None:
+            cls._client = httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(
+                    max_connections=20, max_keepalive_connections=10
+                ),
+            )
+        return cls._client
+
+    @classmethod
+    async def aclose(cls) -> None:
+        if cls._client is not None:
+            await cls._client.aclose()
+            cls._client = None
+
+    @classmethod
+    async def request_with_retry(
+        cls,
+        method: str,
+        url: str,
+        *,
+        headers: dict | None = None,
+        params: Any = None,
+        data: Any = None,
+        json: Any = None,
+        max_attempts: int = 5,
+    ) -> httpx.Response:
+        """HTTP request that retries on 429 / 503 with exponential backoff.
+
+        Honors `Retry-After` when the server provides it; otherwise uses
+        `1 → 2 → 4 → 8 → 16` seconds with up-to-500ms jitter, capped at 60s.
+        """
+        client = cls.http_client()
+        delay = 1.0
+        last_resp: httpx.Response | None = None
+        for attempt in range(1, max_attempts + 1):
+            resp = await client.request(
+                method, url, headers=headers, params=params, data=data, json=json
+            )
+            if resp.status_code not in (429, 503):
+                return resp
+            last_resp = resp
+            if attempt == max_attempts:
+                return resp
+            retry_after = resp.headers.get("Retry-After")
+            wait_s: float | None = None
+            if retry_after:
+                try:
+                    wait_s = float(retry_after)
+                except ValueError:
+                    wait_s = None
+            if wait_s is None:
+                wait_s = delay + random.uniform(0, 0.5)
+            wait_s = min(wait_s, 60.0)
+            logger.info(
+                "%s %s → %s, retrying in %.1fs (attempt %d/%d)",
+                method,
+                url,
+                resp.status_code,
+                wait_s,
+                attempt,
+                max_attempts,
+            )
+            await asyncio.sleep(wait_s)
+            delay = min(delay * 2, 30.0)
+        # Loop only ends via return; this satisfies the type checker.
+        assert last_resp is not None
+        return last_resp
 
     # ── auth ──────────────────────────────────────────────────────────────
     @classmethod

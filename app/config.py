@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     google_scopes: list[str] = ["https://www.googleapis.com/auth/gmail.modify"]
 
     session_secret: str
+    cache_key: str | None = None
     db_path: str = "tasks.db"
     worker_poll_interval_seconds: float = 2.0
     default_schedule_interval_minutes: int | None = None

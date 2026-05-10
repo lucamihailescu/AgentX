@@ -8,7 +8,6 @@ from typing import ClassVar
 from urllib.parse import quote
 
 import aiosqlite
-import httpx
 import msal
 
 from ..auth import _decrypt_blob, _encrypt_blob, _now
@@ -145,43 +144,45 @@ class MicrosoftProvider(MailboxProvider):
         url: str | None = f"{_GRAPH_BASE}/me/messages?{'&'.join(qs)}"
 
         out: list[Message] = []
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            while url and len(out) < limit:
-                token = await cls.acquire_access_token(user_id)
-                resp = await client.get(
-                    url, headers={"Authorization": f"Bearer {token}"}
+        while url and len(out) < limit:
+            token = await cls.acquire_access_token(user_id)
+            resp = await cls.request_with_retry(
+                "GET", url, headers={"Authorization": f"Bearer {token}"}
+            )
+            if resp.status_code >= 400:
+                raise AuthError(
+                    f"Graph GET returned {resp.status_code}: {resp.text[:200]}"
                 )
-                resp.raise_for_status()
-                body = resp.json()
-                for m in body.get("value", []):
-                    unsub = find_unsubscribe(m.get("internetMessageHeaders") or [])
-                    out.append(
-                        Message(
-                            id=m.get("id"),
-                            subject=m.get("subject"),
-                            from_address=(m.get("from") or {})
-                                .get("emailAddress", {})
-                                .get("address"),
-                            received=m.get("receivedDateTime"),
-                            preview=m.get("bodyPreview"),
-                            unsubscribe_url=unsub["url"] if unsub else None,
-                            unsubscribe_one_click=unsub["one_click"] if unsub else False,
-                        )
+            body = resp.json()
+            for m in body.get("value", []):
+                unsub = find_unsubscribe(m.get("internetMessageHeaders") or [])
+                out.append(
+                    Message(
+                        id=m.get("id"),
+                        subject=m.get("subject"),
+                        from_address=(m.get("from") or {})
+                            .get("emailAddress", {})
+                            .get("address"),
+                        received=m.get("receivedDateTime"),
+                        preview=m.get("bodyPreview"),
+                        unsubscribe_url=unsub["url"] if unsub else None,
+                        unsubscribe_one_click=unsub["one_click"] if unsub else False,
                     )
-                    if len(out) >= limit:
-                        break
-                url = body.get("@odata.nextLink") if len(out) < limit else None
+                )
+                if len(out) >= limit:
+                    break
+            url = body.get("@odata.nextLink") if len(out) < limit else None
         return out
 
     @classmethod
     async def delete_message(cls, user_id: str, message_id: str) -> None:
         token = await cls.acquire_access_token(user_id)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.delete(
-                f"{_GRAPH_BASE}/me/messages/{message_id}",
-                headers={"Authorization": f"Bearer {token}"},
+        resp = await cls.request_with_retry(
+            "DELETE",
+            f"{_GRAPH_BASE}/me/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Graph DELETE returned {resp.status_code}: {resp.text[:200]}"
             )
-            if resp.status_code >= 400:
-                raise AuthError(
-                    f"Graph DELETE returned {resp.status_code}: {resp.text[:200]}"
-                )

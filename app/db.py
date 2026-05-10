@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(user_id),
+    kind TEXT NOT NULL DEFAULT 'audit',     -- 'audit' or 'purge'
     status TEXT NOT NULL,
     cursor_before TEXT,
     error TEXT,
@@ -34,10 +35,27 @@ CREATE TABLE IF NOT EXISTS sender_rules (
     PRIMARY KEY (user_id, target, target_type)
 );
 CREATE INDEX IF NOT EXISTS idx_sender_rules_user ON sender_rules(user_id);
+
+CREATE TABLE IF NOT EXISTS sender_stats (
+    user_id TEXT NOT NULL REFERENCES users(user_id),
+    target TEXT NOT NULL,            -- email address (lowercased) or domain
+    target_type TEXT NOT NULL,       -- 'address' or 'domain'
+    seen INTEGER NOT NULL DEFAULT 0,
+    spam INTEGER NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    unsubscribed INTEGER NOT NULL DEFAULT 0,
+    auto_deleted INTEGER NOT NULL DEFAULT 0,
+    last_seen TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, target_type, target)
+);
+CREATE INDEX IF NOT EXISTS idx_sender_stats_user ON sender_stats(user_id);
+CREATE INDEX IF NOT EXISTS idx_sender_stats_spam ON sender_stats(user_id, spam DESC, seen DESC);
 """
 
 _FORWARD_COMPAT_ALTERS = (
     "ALTER TABLE tasks ADD COLUMN cursor_before TEXT",
+    "ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'audit'",
     "ALTER TABLE users ADD COLUMN schedule_interval_hours INTEGER",   # legacy
     "ALTER TABLE users ADD COLUMN schedule_interval_minutes INTEGER",
     "ALTER TABLE users ADD COLUMN provider TEXT NOT NULL DEFAULT 'microsoft'",
