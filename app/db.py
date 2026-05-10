@@ -105,8 +105,28 @@ async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
     return row is not None
 
 
+_PRAGMAS = (
+    # WAL handles concurrent readers + writer cleanly and is much more
+    # resilient than the default rollback journal on filesystems that
+    # don't honor fsync precisely (e.g. macOS Docker Desktop bind mounts,
+    # which were responsible for "database disk image is malformed" in
+    # earlier builds).
+    "PRAGMA journal_mode = WAL",
+    # NORMAL sync gives us durability across crashes while WAL'd; FULL
+    # would be safer but ~3x slower for our write pattern.
+    "PRAGMA synchronous = NORMAL",
+    # 5s busy timeout so concurrent writers (Worker + Scheduler + UI
+    # request handlers) wait politely instead of returning SQLITE_BUSY.
+    "PRAGMA busy_timeout = 5000",
+    # Enforce REFERENCES clauses we declared on tasks.user_id, etc.
+    "PRAGMA foreign_keys = ON",
+)
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(settings.db_path) as db:
+        for pragma in _PRAGMAS:
+            await db.execute(pragma)
         # Run each schema statement individually instead of executescript so
         # any failure is attributable + we can log new-table creations
         # explicitly. CREATE TABLE/INDEX IF NOT EXISTS is idempotent.

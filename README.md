@@ -271,7 +271,7 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_AUTHORITY` | `https://login.microsoftonline.com/consumers` | Use `/common` for both work + personal |
 | `AGENT_REDIRECT_URI` | `http://localhost:8080/auth/callback` | Must exactly match the value registered |
 | `AGENT_SESSION_SECRET` | *required* | Signs both browser session cookies and CLI bearer tokens |
-| `AGENT_DB_PATH` | `tasks.db` | SQLite file path. Compose bind-mounts `./data/` to `/data/` so the SQLite file lives on the host at `./data/tasks.db` and survives `docker compose down -v`. |
+| `AGENT_DB_PATH` | `tasks.db` | SQLite file path. Compose bind-mounts `./data/` to `/data/` so the SQLite file lives on the host at `./data/tasks.db` and survives `docker compose down -v`. The DB runs in **WAL mode** for corruption-resilience under concurrent writes (see "Recovery" below). |
 | `AGENT_WORKER_POLL_INTERVAL_SECONDS` | `2.0` | How often the worker polls for queued rows |
 | `AGENT_OLLAMA_URL` | `http://host.docker.internal:11434` | Ollama base URL |
 | `AGENT_OLLAMA_MODEL` | `llama3.2` | Model name (must be pulled in the target Ollama instance) |
@@ -312,6 +312,31 @@ Two ways to set the interval, with **per-user override taking precedence**:
 If neither is set, scheduling is disabled. The interval is in minutes — `15` for "every 15 minutes", `60` for hourly, `360` for every 6h. The scheduler tick rate (`AGENT_SCHEDULER_TICK_SECONDS`, default 60s) bounds the precision; lower it if you want sub-minute scheduling.
 
 This pairs naturally with rules + the domain blocklist: once you've trained the system, scheduled audits can run unattended and the inbox stays clean.
+
+## Recovery
+
+If you see `sqlite3.DatabaseError: database disk image is malformed` in the agent logs, the SQLite file has structural damage (most often caused by macOS Docker Desktop bind-mount fsync semantics under concurrent writers, which is mitigated but not eliminated by WAL mode):
+
+```bash
+# 1. stop the agent
+docker compose down
+
+# 2. dump+recover whatever's salvageable
+cd data
+echo ".recover" | sqlite3 tasks.db > recovered.sql
+sqlite3 tasks.db.recovered < recovered.sql
+sqlite3 tasks.db.recovered "PRAGMA integrity_check"   # should print "ok"
+
+# 3. swap files
+mv tasks.db tasks.db.broken-$(date +%Y%m%d-%H%M%S)
+mv tasks.db.recovered tasks.db
+rm recovered.sql
+
+# 4. start the agent
+docker compose up --build
+```
+
+`.recover` extracts every page it can read from the corrupt file. In practice this preserves all rows; the only lossy case is when corruption ate the page being recovered. Rebuilding `sender_stats` is automatic on the next audit.
 
 ## Limitations
 
