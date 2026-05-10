@@ -28,6 +28,24 @@
     {% endif %}
   </p>
 
+  {% if task.status == 'completed' and task.result and task.result.message_count > 0 %}
+    {% set received_dates = task.result.messages | map(attribute='received') | select | list %}
+    {% if received_dates %}
+      <div class="next-page">
+        <p class="meta range">
+          <span class="eyebrow inline">range</span>&nbsp;
+          <code>{{ received_dates | max }}</code>
+          &nbsp;→&nbsp;
+          <code>{{ received_dates | min }}</code>
+        </p>
+        <form action="/ui/tasks/{{ task.task_id }}/next" method="post" class="inline">
+          <button type="submit" class="primary">Next page →</button>
+        </form>
+        <p class="meta hint">Continues older than the oldest message in this audit.</p>
+      </div>
+    {% endif %}
+  {% endif %}
+
   {% if task.error %}
     <div class="panel error">
       <div class="eyebrow" style="color: var(--spam)">error</div>
@@ -174,24 +192,6 @@
           </tbody>
         </table>
       </div>
-    {% endif %}
-
-    {% if task.status == 'completed' and task.result and task.result.message_count > 0 %}
-      {% set received_dates = task.result.messages | map(attribute='received') | select | list %}
-      {% if received_dates %}
-        <div class="next-page">
-          <p class="meta range">
-            <span class="eyebrow inline">range</span>&nbsp;
-            <code>{{ received_dates | max }}</code>
-            &nbsp;→&nbsp;
-            <code>{{ received_dates | min }}</code>
-          </p>
-          <form action="/ui/tasks/{{ task.task_id }}/next" method="post" class="inline">
-            <button type="submit" class="primary">Next page →</button>
-          </form>
-          <p class="meta hint">Continues older than the oldest message in this audit.</p>
-        </div>
-      {% endif %}
     {% endif %}
 
     <details class="raw">
@@ -391,8 +391,8 @@
     .rule-btn.deny:hover { color: var(--spam); border-color: var(--spam); background: var(--spam-tint); }
 
     .next-page {
-      margin: 2.5rem 0 0;
-      padding: 1.25rem 1.5rem;
+      margin: 1rem 0 1.5rem;
+      padding: 1rem 1.25rem;
       border: 1px solid var(--border);
       border-radius: var(--radius);
       background: var(--surface);

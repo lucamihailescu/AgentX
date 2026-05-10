@@ -2,11 +2,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    client_id: str
-    client_secret: str
+    # ── Microsoft (Outlook.com) ──────────────────────────────────────────
+    client_id: str | None = None
+    client_secret: str | None = None
     authority: str = "https://login.microsoftonline.com/consumers"
-    redirect_uri: str = "http://localhost:8080/auth/callback"
+    redirect_uri: str = "http://localhost:8080/auth/microsoft/callback"
     scopes: list[str] = ["Mail.ReadWrite"]
+
+    # ── Google (Gmail) ───────────────────────────────────────────────────
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_redirect_uri: str = "http://localhost:8080/auth/google/callback"
+    google_scopes: list[str] = ["https://www.googleapis.com/auth/gmail.modify"]
 
     session_secret: str
     db_path: str = "tasks.db"

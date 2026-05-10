@@ -6,6 +6,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     username TEXT,
+    provider TEXT NOT NULL DEFAULT 'microsoft',
     cache_blob TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -39,6 +40,7 @@ _FORWARD_COMPAT_ALTERS = (
     "ALTER TABLE tasks ADD COLUMN cursor_before TEXT",
     "ALTER TABLE users ADD COLUMN schedule_interval_hours INTEGER",   # legacy
     "ALTER TABLE users ADD COLUMN schedule_interval_minutes INTEGER",
+    "ALTER TABLE users ADD COLUMN provider TEXT NOT NULL DEFAULT 'microsoft'",
 )
 
 

@@ -16,16 +16,15 @@ from starlette.middleware.sessions import SessionMiddleware
 from .auth import (
     CLITokenError,
     TokenAcquisitionError,
-    acquire_access_token,
-    build_auth_code_flow,
-    complete_auth_code_flow,
+    get_user_provider_name,
     issue_cli_token,
     verify_cli_token,
 )
 from .config import settings
 from .db import init_db
-from .graph_client import GraphClient, GraphError
 from . import rules as rules_module
+from .providers import PROVIDERS, get_provider
+from .providers.base import AuthError
 from .unsubscribe import UnsubscribeError, perform_unsubscribe
 from .worker import Scheduler, Worker
 
@@ -57,7 +56,8 @@ async def lifespan(app: FastAPI):
     scheduler = Scheduler()
     worker_task = asyncio.create_task(worker.run(), name="worker")
     scheduler_task = asyncio.create_task(scheduler.run(), name="scheduler")
-    logger.info("agent started; authority=%s", settings.authority)
+    enabled = [n for n, p in PROVIDERS.items() if p.is_configured()]
+    logger.info("agent started; providers=%s", enabled or "(none configured)")
     try:
         yield
     finally:
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(worker_task, scheduler_task, return_exceptions=True)
 
 
-app = FastAPI(title="agentx — consumer Outlook agent", lifespan=lifespan)
+app = FastAPI(title="agentx — multi-provider mailbox agent", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret)
 
 
@@ -84,8 +84,18 @@ def _require_user(request: Request) -> str:
             raise HTTPException(status_code=401, detail=str(exc))
     raise HTTPException(
         status_code=401,
-        detail="Sign in at /auth/login (browser) or pass Authorization: Bearer <cli-token>",
+        detail="Sign in at / (browser) or pass Authorization: Bearer <cli-token>",
     )
+
+
+async def _user_provider(user_id: str):
+    name = await get_user_provider_name(user_id)
+    if not name:
+        raise HTTPException(status_code=404, detail="Unknown user")
+    try:
+        return get_provider(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 async def _insert_task(user_id: str, cursor_before: str | None = None) -> str:
@@ -114,11 +124,19 @@ async def _load_task(user_id: str, task_id: str) -> dict:
     return task
 
 
+# ── pages ────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     user_id = request.session.get("user_id")
     if not user_id:
-        return templates.TemplateResponse("login.html", {"request": request})
+        provider_buttons = [
+            {"name": p.NAME, "label": p.DISPLAY_NAME}
+            for p in PROVIDERS.values() if p.is_configured()
+        ]
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "providers": provider_buttons},
+        )
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -138,21 +156,41 @@ async def index(request: Request):
     )
 
 
-@app.get("/auth/login")
-async def auth_login(request: Request):
-    flow = build_auth_code_flow()
+# ── auth (parameterized per provider) ────────────────────────────────────
+@app.get("/auth/{provider_name}/login")
+async def auth_login(provider_name: str, request: Request):
+    try:
+        provider = get_provider(provider_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    if not provider.is_configured():
+        raise HTTPException(
+            status_code=503, detail=f"{provider.DISPLAY_NAME} is not configured"
+        )
+    try:
+        flow = await provider.build_auth_flow()
+    except AuthError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     request.session["auth_flow"] = flow
+    request.session["auth_provider"] = provider_name
     return RedirectResponse(flow["auth_uri"])
 
 
-@app.get("/auth/callback")
-async def auth_callback(request: Request):
+@app.get("/auth/{provider_name}/callback")
+async def auth_callback(provider_name: str, request: Request):
     flow = request.session.pop("auth_flow", None)
-    if flow is None:
-        raise HTTPException(status_code=400, detail="No auth flow in session")
+    expected = request.session.pop("auth_provider", None)
+    if flow is None or expected != provider_name:
+        raise HTTPException(status_code=400, detail="No matching auth flow in session")
     try:
-        user_id, username = await complete_auth_code_flow(flow, dict(request.query_params))
-    except TokenAcquisitionError as exc:
+        provider = get_provider(provider_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    try:
+        user_id, username = await provider.complete_auth_flow(
+            flow, dict(request.query_params)
+        )
+    except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     request.session["user_id"] = user_id
     request.session["username"] = username
@@ -169,7 +207,7 @@ async def auth_logout(request: Request):
 async def auth_cli_token(request: Request):
     user_id = request.session.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=401, detail="Sign in at /auth/login first")
+        raise HTTPException(status_code=401, detail="Sign in first")
     token, ttl = issue_cli_token(user_id)
     return {
         "token": token,
@@ -178,6 +216,7 @@ async def auth_cli_token(request: Request):
     }
 
 
+# ── tasks UI ─────────────────────────────────────────────────────────────
 @app.post("/ui/tasks")
 async def ui_create_task(request: Request):
     user_id = _require_user(request)
@@ -222,14 +261,11 @@ async def _save_result(task_id: str, result: dict) -> None:
         await db.commit()
 
 
-async def _graph_delete_message(user_id: str, message_id: str) -> None:
-    async def token_provider() -> str:
-        return await acquire_access_token(user_id)
-
+async def _delete_message(user_id: str, message_id: str) -> None:
+    provider = await _user_provider(user_id)
     try:
-        async with GraphClient(token_provider) as graph:
-            await graph.request("DELETE", f"/me/messages/{message_id}")
-    except (TokenAcquisitionError, GraphError) as exc:
+        await provider.delete_message(user_id, message_id)
+    except AuthError as exc:
         raise HTTPException(status_code=502, detail=f"Delete failed: {exc}")
 
 
@@ -253,7 +289,7 @@ async def ui_delete_message(task_id: str, message_id: str, request: Request):
     target = _find_message(task, message_id)
     if target.get("deleted"):
         return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
-    await _graph_delete_message(user_id, message_id)
+    await _delete_message(user_id, message_id)
     target["deleted"] = True
     target["deleted_at"] = datetime.now(timezone.utc).isoformat()
     await _save_result(task_id, task["result"])
@@ -298,8 +334,7 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
     by_id = {m.get("id"): m for m in task["result"].get("messages", [])}
     targets = [by_id[mid] for mid in message_ids if mid in by_id]
 
-    async def token_provider() -> str:
-        return await acquire_access_token(user_id)
+    provider = await _user_provider(user_id)
 
     semaphore = asyncio.Semaphore(4)
     do_unsub = action in {"unsubscribe", "unsubscribe-and-delete"}
@@ -322,37 +357,34 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
                 target["spam"] = False
                 target["reason"] = "allowlisted sender"
 
-    async with GraphClient(token_provider) as graph:
+    async def _process(target: dict) -> None:
+        if not target.get("id"):
+            return
+        async with semaphore:
+            if (
+                do_unsub
+                and target.get("unsubscribe_url")
+                and not target.get("unsubscribed")
+            ):
+                try:
+                    await perform_unsubscribe(
+                        target["unsubscribe_url"],
+                        bool(target.get("unsubscribe_one_click")),
+                    )
+                    target["unsubscribed"] = True
+                    target["unsubscribed_at"] = datetime.now(timezone.utc).isoformat()
+                except UnsubscribeError as exc:
+                    logger.warning("bulk unsub failed for %s: %s", target["id"], exc)
 
-        async def _process(target: dict) -> None:
-            if not target.get("id"):
-                return
-            async with semaphore:
-                if (
-                    do_unsub
-                    and target.get("unsubscribe_url")
-                    and not target.get("unsubscribed")
-                ):
-                    try:
-                        await perform_unsubscribe(
-                            target["unsubscribe_url"],
-                            bool(target.get("unsubscribe_one_click")),
-                        )
-                        target["unsubscribed"] = True
-                        target["unsubscribed_at"] = datetime.now(timezone.utc).isoformat()
-                    except UnsubscribeError as exc:
-                        logger.warning("bulk unsub failed for %s: %s", target["id"], exc)
+            if do_delete and not target.get("deleted"):
+                try:
+                    await provider.delete_message(user_id, target["id"])
+                    target["deleted"] = True
+                    target["deleted_at"] = datetime.now(timezone.utc).isoformat()
+                except AuthError as exc:
+                    logger.warning("bulk delete failed for %s: %s", target["id"], exc)
 
-                if do_delete and not target.get("deleted"):
-                    try:
-                        await graph.request("DELETE", f"/me/messages/{target['id']}")
-                        target["deleted"] = True
-                        target["deleted_at"] = datetime.now(timezone.utc).isoformat()
-                    except (GraphError, TokenAcquisitionError) as exc:
-                        logger.warning("bulk delete failed for %s: %s", target["id"], exc)
-
-        await asyncio.gather(*(_process(t) for t in targets))
-
+    await asyncio.gather(*(_process(t) for t in targets))
     await _save_result(task_id, task["result"])
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
@@ -376,9 +408,9 @@ async def ui_set_rule(task_id: str, message_id: str, verdict: str, request: Requ
     if verdict == "allow":
         target["spam"] = False
         target["reason"] = "allowlisted sender"
-    else:  # deny → also delete the surfaced message
+    else:
         if not target.get("deleted"):
-            await _graph_delete_message(user_id, message_id)
+            await _delete_message(user_id, message_id)
             target["deleted"] = True
             target["deleted_at"] = datetime.now(timezone.utc).isoformat()
         target["reason"] = "denylisted sender"
@@ -387,6 +419,7 @@ async def ui_set_rule(task_id: str, message_id: str, verdict: str, request: Requ
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
+# ── senders / rules / settings ───────────────────────────────────────────
 @app.get("/ui/senders", response_class=HTMLResponse)
 async def ui_senders(request: Request):
     user_id = _require_user(request)
@@ -512,7 +545,7 @@ async def ui_unsubscribe_and_delete(task_id: str, message_id: str, request: Requ
         return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
     if not target.get("unsubscribed"):
         await _do_unsubscribe(target)
-    await _graph_delete_message(user_id, message_id)
+    await _delete_message(user_id, message_id)
     target["deleted"] = True
     target["deleted_at"] = datetime.now(timezone.utc).isoformat()
     await _save_result(task_id, task["result"])
@@ -554,7 +587,7 @@ async def ui_next_page(task_id: str, request: Request):
     ]
     if not received:
         raise HTTPException(status_code=400, detail="Parent audit has no message timestamps")
-    cursor = min(received)  # ISO 8601 timestamps sort lexically as datetimes
+    cursor = min(received)
     new_id = await _insert_task(user_id, cursor_before=cursor)
     return RedirectResponse(f"/ui/tasks/{new_id}", status_code=303)
 
@@ -565,7 +598,8 @@ async def ui_settings(request: Request):
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT schedule_interval_minutes FROM users WHERE user_id = ?", (user_id,)
+            "SELECT schedule_interval_minutes, provider FROM users WHERE user_id = ?",
+            (user_id,),
         )
         row = await cur.fetchone()
         cur = await db.execute(
@@ -573,6 +607,12 @@ async def ui_settings(request: Request):
             (user_id,),
         )
         last_row = await cur.fetchone()
+    provider_label = None
+    if row and row["provider"]:
+        try:
+            provider_label = get_provider(row["provider"]).DISPLAY_NAME
+        except ValueError:
+            provider_label = row["provider"]
     return templates.TemplateResponse(
         "settings.html",
         {
@@ -581,6 +621,7 @@ async def ui_settings(request: Request):
             "schedule_interval_minutes": row["schedule_interval_minutes"] if row else None,
             "default_schedule_interval_minutes": settings.default_schedule_interval_minutes,
             "last_audit_at": last_row["last_at"] if last_row else None,
+            "provider_label": provider_label,
         },
     )
 
@@ -631,9 +672,6 @@ async def favicon_svg():
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon_ico():
-    # Browsers fall back to /favicon.ico when there's no <link rel="icon">.
-    # We serve the SVG via the link tag in base.html; this exists to silence
-    # 404 noise without serving a real ICO.
     return Response(status_code=204)
 
 

@@ -1,15 +1,14 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from urllib.parse import quote
 
 import httpx
 
 from .config import BLOCKED_DOMAINS, settings
-from .graph_client import GraphClient, GraphError
 from .ollama_client import classify
+from .providers import MailboxProvider
+from .providers.base import AuthError
 from .rules import lookup as lookup_rule
-from .unsubscribe import find_unsubscribe
 
 logger = logging.getLogger(__name__)
 
@@ -25,85 +24,72 @@ def is_blocked(address: str | None, blocked: frozenset[str] | set[str]) -> bool:
     return any(".".join(parts[i:]) in blocked for i in range(len(parts)))
 
 
-_GRAPH_PAGE_SIZE = 50  # Graph's preferred page size; we walk @odata.nextLink for more.
-
-
 async def fetch_messages(
-    graph: GraphClient,
+    provider: type[MailboxProvider],
+    user_id: str,
+    *,
     limit: int | None = None,
     cursor_before: str | None = None,
 ) -> list[dict]:
-    """Fetch up to `limit` messages (default `settings.max_messages_per_audit`)
-    by walking Microsoft Graph's `@odata.nextLink` pagination.
-
-    If `cursor_before` (an ISO 8601 timestamp) is provided, only messages
-    received strictly before that time are returned — the basis for the
-    "Next page" flow that walks back through the mailbox in batches.
-    """
     target = limit if limit is not None else settings.max_messages_per_audit
-    page_size = min(_GRAPH_PAGE_SIZE, target)
-
-    qs = [
-        f"$top={page_size}",
-        "$select=id,subject,from,receivedDateTime,bodyPreview,internetMessageHeaders",
-        "$orderby=receivedDateTime desc",
-    ]
-    if cursor_before:
-        qs.append(f"$filter={quote(f'receivedDateTime lt {cursor_before}')}")
-    url: str | None = f"/me/messages?{'&'.join(qs)}"
-    out: list[dict] = []
-
-    while url and len(out) < target:
-        resp = await graph.request("GET", url)
-        body = resp.json()
-        for m in body.get("value", []):
-            unsub = find_unsubscribe(m.get("internetMessageHeaders") or [])
-            out.append(
-                {
-                    "id": m.get("id"),
-                    "subject": m.get("subject"),
-                    "from": (m.get("from") or {}).get("emailAddress", {}).get("address"),
-                    "received": m.get("receivedDateTime"),
-                    "preview": m.get("bodyPreview"),
-                    "unsubscribe_url": unsub["url"] if unsub else None,
-                    "unsubscribe_one_click": unsub["one_click"] if unsub else False,
-                }
-            )
-            if len(out) >= target:
-                break
-        url = body.get("@odata.nextLink") if len(out) < target else None
-
-    return out
+    messages = await provider.fetch_messages(
+        user_id, limit=target, cursor_before=cursor_before
+    )
+    return [m.to_dict() for m in messages]
 
 
-async def auto_delete_blocked(graph: GraphClient, messages: list[dict]) -> list[dict]:
-    """Delete messages whose sender domain is in `settings.blocked_domains`.
+async def auto_delete(
+    provider: type[MailboxProvider],
+    user_id: str,
+    messages: list[dict],
+    rules: dict[tuple[str, str], str] | None = None,
+) -> list[dict]:
+    """Delete messages whose sender is either in `BLOCKED_DOMAINS` or has a
+    `deny` rule. Runs before classification, so the user's explicit "always
+    block" choices are honored on every future audit (not just the click that
+    created the rule).
 
-    Failures are logged and the message stays in the list so it falls through
-    to normal classification — better to surface a stale block-list match in
-    the report than to fail the whole task.
+    Per-message failures are logged and the message stays in the list so it
+    falls through to normal classification — better to surface a stale match
+    than to fail the whole task.
     """
-    if not BLOCKED_DOMAINS:
+    rules = rules or {}
+    if not BLOCKED_DOMAINS and not rules:
         return messages
 
     semaphore = asyncio.Semaphore(4)
 
     async def _maybe_delete(m: dict) -> dict:
-        if not m.get("id") or not is_blocked(m.get("from"), BLOCKED_DOMAINS):
+        if not m.get("id"):
+            return m
+        from_addr = m.get("from")
+        if not from_addr:
+            return m
+        domain_blocked = is_blocked(from_addr, BLOCKED_DOMAINS)
+        rule_denied = lookup_rule(rules, from_addr) == "deny"
+        if not (domain_blocked or rule_denied):
             return m
         async with semaphore:
             try:
-                await graph.request("DELETE", f"/me/messages/{m['id']}")
-            except GraphError as exc:
+                await provider.delete_message(user_id, m["id"])
+            except AuthError as exc:
                 logger.warning(
-                    "auto-delete failed for %s (from=%s): %s", m["id"], m.get("from"), exc
+                    "auto-delete failed for %s (from=%s, source=%s): %s",
+                    m["id"],
+                    from_addr,
+                    "rule" if rule_denied else "blocklist",
+                    exc,
                 )
                 return m
-        return {
+        out = {
             **m,
             "auto_deleted": True,
             "auto_deleted_at": datetime.now(timezone.utc).isoformat(),
         }
+        if rule_denied:
+            out["rule_applied"] = "deny"
+            out["reason"] = "denylisted sender"
+        return out
 
     return await asyncio.gather(*(_maybe_delete(m) for m in messages))
 
@@ -112,14 +98,6 @@ async def classify_messages(
     messages: list[dict],
     rules: dict[tuple[str, str], str] | None = None,
 ) -> list[dict]:
-    """Run each non-auto-deleted message through Ollama in parallel.
-
-    Sender rules short-circuit Ollama:
-      - `allow`  → spam=False with reason "allowlisted"
-      - `deny`   → spam=True  with reason "denylisted"
-    Per-message Ollama failures degrade gracefully (spam=None) so a flaky or
-    unreachable Ollama doesn't fail the whole task.
-    """
     rules = rules or {}
     semaphore = asyncio.Semaphore(settings.ollama_concurrency)
     async with httpx.AsyncClient(base_url=settings.ollama_url) as client:

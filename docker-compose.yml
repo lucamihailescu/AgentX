@@ -9,10 +9,15 @@ services:
     ports:
       - "8080:8080"
     environment:
-      AGENT_CLIENT_ID: ${CLIENT_ID}
-      AGENT_CLIENT_SECRET: ${CLIENT_SECRET}
+      # Microsoft (leave blank if you only want Gmail)
+      AGENT_CLIENT_ID: ${CLIENT_ID:-}
+      AGENT_CLIENT_SECRET: ${CLIENT_SECRET:-}
       AGENT_AUTHORITY: ${AUTHORITY:-https://login.microsoftonline.com/consumers}
-      AGENT_REDIRECT_URI: ${REDIRECT_URI:-http://localhost:8080/auth/callback}
+      AGENT_REDIRECT_URI: ${REDIRECT_URI:-http://localhost:8080/auth/microsoft/callback}
+      # Google (leave blank if you only want Outlook)
+      AGENT_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      AGENT_GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      AGENT_GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8080/auth/google/callback}
       AGENT_SESSION_SECRET: ${SESSION_SECRET}
       AGENT_DB_PATH: /data/tasks.db
       AGENT_OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
@@ -26,7 +31,6 @@ services:
       AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES: ${DEFAULT_SCHEDULE_INTERVAL_MINUTES:-}
       AGENT_SCHEDULER_TICK_SECONDS: ${SCHEDULER_TICK_SECONDS:-60}
     volumes:
-      - agent-data:/data
-
-volumes:
-  agent-data:
+      # Bind-mount to a host directory so `docker compose down -v`
+      # does NOT touch the SQLite file. Data lives in ./data/ on the host.
+      - ./data:/data

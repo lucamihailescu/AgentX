@@ -36,6 +36,10 @@
     <p class="meta" style="margin-top: 1.25rem; font-size: .8rem">
       <span class="eyebrow inline">last audit</span>&nbsp;
       <code>{{ last_audit_at or '— none yet —' }}</code>
+      {% if provider_label %}
+        &nbsp;·&nbsp;
+        <span class="eyebrow inline">provider</span>&nbsp;<code>{{ provider_label }}</code>
+      {% endif %}
     </p>
   </div>
 

@@ -6,11 +6,11 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
-from .auth import TokenAcquisitionError, acquire_access_token
 from .config import settings
-from .graph_client import GraphClient, GraphError
+from .providers import get_provider
+from .providers.base import AuthError
 from .rules import load_rule_index
-from .tasks import auto_delete_blocked, classify_messages, fetch_messages, generate_report
+from .tasks import auto_delete, classify_messages, fetch_messages, generate_report
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +42,9 @@ class Worker:
         async with aiosqlite.connect(settings.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT task_id, user_id, cursor_before FROM tasks "
-                "WHERE status = 'queued' ORDER BY created_at LIMIT 1"
+                """SELECT t.task_id, t.user_id, t.cursor_before, u.provider
+                   FROM tasks t JOIN users u ON t.user_id = u.user_id
+                   WHERE t.status = 'queued' ORDER BY t.created_at LIMIT 1"""
             )
             row = await cur.fetchone()
             if row is None:
@@ -58,24 +59,27 @@ class Worker:
     async def _process(self, task: dict) -> None:
         task_id = task["task_id"]
         user_id = task["user_id"]
-
-        async def token_provider() -> str:
-            return await acquire_access_token(user_id)
-
         cursor_before = task.get("cursor_before")
         try:
-            async with GraphClient(token_provider) as graph:
-                messages = await fetch_messages(graph, cursor_before=cursor_before)
-                messages = await auto_delete_blocked(graph, messages)
+            provider = get_provider(task.get("provider"))
+        except ValueError as exc:
+            await self._update(task_id, status="failed", error=f"Provider: {exc}")
+            return
+        try:
+            messages = await fetch_messages(
+                provider, user_id, cursor_before=cursor_before
+            )
             rules = await load_rule_index(user_id)
+            messages = await auto_delete(provider, user_id, messages, rules)
             classified = await classify_messages(messages, rules)
             report = await generate_report(classified)
             await self._update(
                 task_id, status="completed", result_data=json.dumps(report)
             )
-        except TokenAcquisitionError as exc:
+        except AuthError as exc:
             await self._update(task_id, status="failed", error=f"Auth: {exc}")
-        except GraphError as exc:
+        except Exception as exc:
+            logger.exception("Task %s failed", task_id)
             await self._update(task_id, status="failed", error=str(exc))
 
     @staticmethod
@@ -100,11 +104,7 @@ class Scheduler:
     """Inserts queued audit tasks for users on a configurable interval.
 
     Per-user override (`users.schedule_interval_minutes`) wins; when unset,
-    `AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES` is used. If neither is set, the
-    user is skipped.
-
-    Wakes every `AGENT_SCHEDULER_TICK_SECONDS` (default 60); skips users with
-    an audit already queued or processing to avoid pile-up.
+    `AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES` is used.
     """
 
     def __init__(self) -> None:

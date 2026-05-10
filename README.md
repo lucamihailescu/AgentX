@@ -1,8 +1,8 @@
 # agentx
 
-A long-running background agent for **consumer Microsoft accounts** (outlook.com / hotmail / live).
+A long-running mailbox-audit agent for **consumer Microsoft (outlook.com)** and **consumer Google (gmail.com)** accounts.
 
-The agent signs the user in with MSAL (auth code + PKCE), persists their token cache in SQLite, and runs background tasks against Microsoft Graph using silently-refreshed access tokens — so a queued job can keep working on the user's mailbox even after the original access token expires. Results are rendered in a built-in web UI; nothing is written back to the user's mailbox or OneDrive.
+Each user is bound to a single provider on first sign-in. The agent persists an encrypted token cache, runs background audits against the appropriate API (Microsoft Graph for Outlook, Gmail REST API for Gmail), classifies messages locally with Ollama, applies the user's allow/deny rules, and renders results in a built-in web UI. Nothing is sent on the user's behalf — the agent only reads and trashes mail.
 
 ## Why MSAL and not the Entra Agent ID SDK?
 
@@ -34,11 +34,13 @@ So this codebase drops the sidecar and goes straight to MSAL. The "long-running"
 
 | File | Role |
 | --- | --- |
-| `app/main.py` | FastAPI app: HTML pages (`/`, `/ui/tasks/{id}`, `/ui/rules`, `/ui/senders`, `/ui/settings`), JSON API (`/tasks`, `/tasks/{id}`), auth (`/auth/*`) |
-| `app/auth.py` | MSAL `ConfidentialClientApplication` wrapper; per-user `SerializableTokenCache` persisted **encrypted** in SQLite (Fernet, key derived from `SESSION_SECRET`); CLI-token signer (itsdangerous) |
+| `app/main.py` | FastAPI app: HTML pages (`/`, `/ui/tasks/{id}`, `/ui/rules`, `/ui/senders`, `/ui/settings`), JSON API (`/tasks`, `/tasks/{id}`), per-provider auth (`/auth/{provider}/login` + `/callback`) |
+| `app/auth.py` | Provider-agnostic infrastructure: Fernet encryption for `users.cache_blob`, provider lookup, CLI token signer |
+| `app/providers/base.py` | `MailboxProvider` abstract base + `Message` dataclass — the shared contract between the pipeline and any backend |
+| `app/providers/microsoft.py` | MSAL + Microsoft Graph implementation |
+| `app/providers/google.py` | OAuth 2.0 (PKCE) + Gmail REST API implementation |
 | `app/rules.py` | Per-user `sender_rules` CRUD + lookup helper. Address rules win over domain rules. |
-| `app/graph_client.py` | Async Graph wrapper that pulls a fresh token from a `token_provider` callable before every request |
-| `app/tasks.py` | Pipeline: fetch messages → auto-delete blocked → apply sender rules → classify remaining via Ollama → build report dict |
+| `app/tasks.py` | Pipeline: fetch via provider → auto-delete blocked → apply sender rules → classify remaining via Ollama → build report dict |
 | `app/ollama_client.py` | Async client for `POST {OLLAMA_URL}/api/generate` with `format=json`; defensive parsing |
 | `app/worker.py` | Two background loops: `Worker` claims queued rows and runs the pipeline; `Scheduler` queues new audits per user on a configurable interval |
 | `app/templates/` | Jinja2 templates: `base.html`, `login.html`, `index.html`, `task.html`, `rules.html`, `senders.html`, `settings.html` |
@@ -47,18 +49,34 @@ So this codebase drops the sidecar and goes straight to MSAL. The "long-running"
 
 The agent's stable per-user identifier is MSAL's `home_account_id` — used as the FK on `tasks.user_id` and as the payload in the CLI bearer token.
 
-## App registration
+## Provider registration
+
+You only need to register the provider(s) you actually want to sign in with. The login page only shows a button for a provider whose env vars are set.
+
+### Microsoft (Outlook.com)
 
 In [Microsoft Entra admin center](https://entra.microsoft.com) → **Applications** → **App registrations** → **New registration**:
 
 1. **Supported account types**: *Personal Microsoft accounts only*.
-2. **Platform**: Web. **Redirect URI**: `http://localhost:8080/auth/callback`.
+2. **Platform**: Web. **Redirect URI**: `http://localhost:8080/auth/microsoft/callback`.
 3. Under **Certificates & secrets**, create a client secret.
 4. Under **API permissions** → **Microsoft Graph** → **Delegated**, add:
    - `Mail.ReadWrite`
    - `offline_access`
 
-   No admin consent is needed — the user grants consent themselves on first sign-in. `Mail.ReadWrite` is needed because the report's per-message **Delete** button calls `DELETE /me/messages/{id}` to move flagged spam to *Deleted Items*. The agent never sends mail or touches OneDrive.
+   No admin consent is needed — the user grants consent themselves on first sign-in.
+
+### Google (Gmail)
+
+In [Google Cloud Console](https://console.cloud.google.com):
+
+1. Create a project, then **OAuth consent screen** → *External* → publishing status **Testing**. Add yourself as a test user.
+2. **Credentials** → **Create Credentials** → **OAuth client ID** → *Web application*.
+3. Authorized redirect URI: `http://localhost:8080/auth/google/callback`.
+4. **Library** → enable the **Gmail API**.
+5. Copy the client ID + secret into `.env` as `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+
+The scope used is `https://www.googleapis.com/auth/gmail.modify` — read + label/move-to-trash. **Testing-mode** apps don't require Google's verification process; you simply have to be one of the (≤100) test users you've added to the consent screen. If you ever wanted to share this with others, that would trigger Google's verification flow.
 
 ## Run
 
@@ -105,8 +123,8 @@ Then in a browser: <http://localhost:8080> → "Sign in with Microsoft" → land
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| GET | `/auth/login` | none | Redirect to Microsoft |
-| GET | `/auth/callback` | none | OAuth code exchange |
+| GET | `/auth/{provider}/login` | none | Start OAuth flow for `microsoft` or `google` |
+| GET | `/auth/{provider}/callback` | none | OAuth code exchange (provider-specific) |
 | POST | `/auth/logout` | any | Clear session |
 | GET | `/auth/cli-token` | session | Issue a 1-hour bearer for shell use |
 | GET | `/healthz` | none | Liveness |
@@ -217,7 +235,7 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_AUTHORITY` | `https://login.microsoftonline.com/consumers` | Use `/common` for both work + personal |
 | `AGENT_REDIRECT_URI` | `http://localhost:8080/auth/callback` | Must exactly match the value registered |
 | `AGENT_SESSION_SECRET` | *required* | Signs both browser session cookies and CLI bearer tokens |
-| `AGENT_DB_PATH` | `tasks.db` | SQLite file path; the compose volume mounts `/data` |
+| `AGENT_DB_PATH` | `tasks.db` | SQLite file path. Compose bind-mounts `./data/` to `/data/` so the SQLite file lives on the host at `./data/tasks.db` and survives `docker compose down -v`. |
 | `AGENT_WORKER_POLL_INTERVAL_SECONDS` | `2.0` | How often the worker polls for queued rows |
 | `AGENT_OLLAMA_URL` | `http://host.docker.internal:11434` | Ollama base URL |
 | `AGENT_OLLAMA_MODEL` | `llama3.2` | Model name (must be pulled in the target Ollama instance) |
@@ -237,7 +255,9 @@ The model misclassifies sometimes — a newsletter you actually want gets flagge
 
 - **Address rule** (`user@example.com`) — exact match.
 - **Domain rule** (`example.com`) — matches that domain and any subdomain.
-- **Verdict**: `allow` (skip Ollama, mark `ok`) or `deny` (skip Ollama, mark spam — and on the click that creates the rule, the surfaced message is deleted).
+- **Verdict**:
+  - `allow` — skip Ollama, mark `ok`.
+  - `deny` — **auto-delete on every future audit**. Behaves like the env-level `BLOCKED_DOMAINS` for that one sender. Existing audit reports are immutable snapshots and won't retroactively delete; the next audit applies the rule.
 
 Per-row buttons inside an audit (✓ allow / ✕ block) create address rules from the message's `from`. Bulk variants (`allow sender` / `block sender` in the toolbar) create one rule per unique sender across the selection. The full set is editable on **`/ui/rules`** — and the **`/ui/senders`** page surfaces aggregate counts so you can spot which domains keep showing up.
 

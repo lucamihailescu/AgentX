@@ -3,7 +3,7 @@
 {% block body %}
   <div class="login">
     <div class="eyebrow">authentication required</div>
-    <h1>An audit instrument for your <em>outlook.com</em> inbox.</h1>
+    <h1>An audit instrument for your <em>inbox</em>.</h1>
 
     <p class="lede">
       <span class="mono">agentx</span> classifies recent mail with a local Ollama model,
@@ -11,62 +11,72 @@
       and presents the lot as a queryable audit. Long-running, single-tenant, on your own infrastructure.
     </p>
 
-    <a href="/auth/login" class="cta-link">
-      <button class="primary" type="button">Sign in with Microsoft &nbsp;→</button>
-    </a>
+    {% if providers %}
+      <div class="provider-buttons">
+        {% for p in providers %}
+          <a href="/auth/{{ p.name }}/login" class="cta-link">
+            <button class="primary" type="button">Sign in with {{ p.label }} &nbsp;→</button>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="panel" style="border-color: var(--spam); background: var(--spam-tint)">
+        <div class="eyebrow" style="color: var(--spam)">no provider configured</div>
+        <p class="meta">
+          No authentication provider is configured. Set
+          <code>AGENT_CLIENT_ID</code> + <code>AGENT_CLIENT_SECRET</code> for Microsoft, or
+          <code>AGENT_GOOGLE_CLIENT_ID</code> + <code>AGENT_GOOGLE_CLIENT_SECRET</code> for Google,
+          then restart the agent.
+        </p>
+      </div>
+    {% endif %}
 
     <div class="trust">
-      <div class="eyebrow">scope requested</div>
+      <div class="eyebrow">scopes requested</div>
       <div class="scopes">
         <code class="scope">Mail.ReadWrite</code>
         <code class="scope">offline_access</code>
+        <span class="scope-sep">·</span>
+        <code class="scope">gmail.modify</code>
       </div>
       <p class="meta scope-note">
-        <code>Mail.ReadWrite</code> is required to move messages to <em>Deleted Items</em> when you
-        click delete. The agent never sends mail. Tokens are stored locally.
+        The agent only reads and trashes mail, never sends. Tokens are stored
+        encrypted on this host.
       </p>
     </div>
   </div>
 
   <style>
-    .login {
-      max-width: 620px;
-      margin: 4rem auto;
-      padding: 1rem;
-    }
+    .login { max-width: 620px; margin: 4rem auto; padding: 1rem; }
     .login h1 { margin-bottom: 1.25rem; }
     .lede {
-      font-size: 1rem;
-      line-height: 1.7;
-      color: var(--text);
-      max-width: 52ch;
-      margin: 0 0 2rem;
+      font-size: 1rem; line-height: 1.7; color: var(--text);
+      max-width: 52ch; margin: 0 0 2rem;
     }
     .lede .mono { color: var(--accent); }
     .lede code {
-      background: var(--surface-2);
-      padding: .05rem .35rem;
-      border-radius: 3px;
-      font-size: .85em;
+      background: var(--surface-2); padding: .05rem .35rem;
+      border-radius: 3px; font-size: .85em;
     }
-    .cta-link { border: none; }
-    .cta-link:hover { border: none; }
+    .provider-buttons {
+      display: flex; gap: .65rem; flex-wrap: wrap;
+    }
+    .cta-link, .cta-link:hover { border: none; }
     .trust {
-      margin-top: 3.5rem;
-      padding-top: 1.5rem;
+      margin-top: 3.5rem; padding-top: 1.5rem;
       border-top: 1px solid var(--border);
     }
-    .scopes { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .9rem; }
+    .scopes {
+      display: flex; gap: .4rem; flex-wrap: wrap;
+      align-items: center; margin-bottom: .9rem;
+    }
     .scope {
-      display: inline-block;
-      padding: .3rem .65rem;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      font-size: .78rem;
+      display: inline-block; padding: .3rem .65rem;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); font-size: .78rem;
       color: var(--text-muted);
     }
+    .scope-sep { color: var(--text-faint); }
     .scope-note { max-width: 56ch; }
-    .scope-note em { font-family: var(--serif); font-style: italic; color: var(--text); }
   </style>
 {% endblock %}
