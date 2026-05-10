@@ -99,7 +99,8 @@ Then in a browser: <http://localhost:8080> → "Sign in with Microsoft" → land
 | --- | --- | --- | --- |
 | GET | `/` | optional | Sign-in page when signed out; task list when signed in |
 | POST | `/ui/tasks` | session | Form action — queues a task and redirects to its detail page |
-| GET | `/ui/tasks/{id}` | session / bearer | Task detail page with rendered report (auto-refreshes while pending). Includes filter bar (text + status chips) and per-row allow/block icons. |
+| GET | `/ui/tasks/{id}` | session / bearer | Task detail page with rendered report (auto-refreshes while pending). Includes filter bar (text + status chips), per-row allow/block icons, and click-to-expand subject for inline body preview. |
+| GET | `/ui/tasks/{id}/messages/{mid}/body` | session / bearer | Renders the full message body in a self-contained, iframe-loadable HTML doc. Strict CSP (`default-src 'none'; img-src 'none'; style-src 'unsafe-inline'`). Used by the inline preview pane in the task page. |
 | POST | `/ui/tasks/{id}/messages/{mid}/delete` | session / bearer | Move the message to Deleted Items via Graph and mark it `deleted` in the cached report |
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe` | session / bearer | Hit the message's `List-Unsubscribe` HTTPS URL (POST if one-click, else GET); mark `unsubscribed` |
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe-and-delete` | session / bearer | Unsubscribe, then delete |
@@ -199,6 +200,16 @@ When a task runs, every message whose `from` address matches the blocklist is de
 **Subdomain matching is enabled.** Listing `example.com` also matches `mail.example.com`, `news.example.com`, etc. Listing `mail.example.com` matches only that exact subdomain.
 
 Blocklist matches show up in the report as `auto-deleted` (greyed-out row, no action buttons) and contribute to the `auto_deleted_count` in the summary. If a Graph delete fails (network blip, message already gone), the worker logs a warning and lets the message fall through to normal classification — better to surface a stale match than to fail the whole task.
+
+### Inline body preview
+
+Click the subject of any message in an audit to expand the full body inline below the row. The body is fetched on demand (Graph `$select=body` for Outlook, Gmail `messages.get?format=full` walking the MIME parts for `text/html` then falling back to `text/plain`) and rendered inside a `<iframe sandbox>` that:
+
+- Has no `allow-*` tokens — scripts, forms, popups, and top-level navigation are all blocked.
+- Sets a strict CSP on the body document: `default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'`. Tracking pixels and remote stylesheets/fonts/scripts can't load. Inline `style="…"` and `<style>…</style>` are allowed so the email's layout still renders.
+- Sends `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`.
+
+Click the subject again to collapse. Multiple rows can be expanded at once. The iframe is `loading="lazy"` and only requests the body on first expand, so opening a task page doesn't fetch every body upfront.
 
 ### Proactive rule suggestions
 

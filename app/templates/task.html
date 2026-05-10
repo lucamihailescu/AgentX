@@ -244,8 +244,12 @@
                   {% endif %}
                 </td>
                 <td><code class="from">{{ m.from or '—' }}</code></td>
-                <td class="subject">
-                  <div class="subject-line">{{ m.subject or '(no subject)' }}</div>
+                <td class="subject{% if m.id %} expandable{% endif %}"
+                    {% if m.id %}data-message-id="{{ m.id }}" title="Click to preview body"{% endif %}>
+                  <div class="subject-line">
+                    {% if m.id %}<span class="chevron">▸</span>{% endif %}
+                    {{ m.subject or '(no subject)' }}
+                  </div>
                   {% if m.reason %}<div class="reason">{{ m.reason }}</div>{% endif %}
                 </td>
                 <td class="meta received">{{ m.received or '' }}</td>
@@ -376,6 +380,45 @@
           applyFilter();
         });
       });
+
+      // ───── inline body preview ─────
+      const taskIdForBody = "{{ task.task_id }}";
+      document.querySelectorAll('td.subject.expandable').forEach(cell => {
+        cell.addEventListener('click', (e) => {
+          // Don't trigger when the user is selecting text
+          const sel = window.getSelection();
+          if (sel && sel.toString().length > 0 && sel.containsNode(e.target, true)) return;
+
+          const row = cell.closest('tr');
+          const next = row.nextElementSibling;
+          const mid = cell.dataset.messageId;
+          if (!mid) return;
+
+          if (next && next.classList.contains('body-row')) {
+            // Toggle existing
+            const isOpen = !next.hidden;
+            next.hidden = isOpen;
+            cell.classList.toggle('expanded', !isOpen);
+            return;
+          }
+
+          // Create new body row
+          const bodyRow = document.createElement('tr');
+          bodyRow.className = 'body-row';
+          const td = document.createElement('td');
+          td.colSpan = row.children.length;
+          const iframe = document.createElement('iframe');
+          iframe.className = 'body-frame';
+          iframe.setAttribute('sandbox', '');
+          iframe.setAttribute('loading', 'lazy');
+          iframe.setAttribute('referrerpolicy', 'no-referrer');
+          iframe.src = `/ui/tasks/${encodeURIComponent(taskIdForBody)}/messages/${encodeURIComponent(mid)}/body`;
+          td.appendChild(iframe);
+          bodyRow.appendChild(td);
+          row.parentNode.insertBefore(bodyRow, row.nextSibling);
+          cell.classList.add('expanded');
+        });
+      });
     })();
   </script>
 
@@ -429,6 +472,30 @@
     .subject-line {
       font-weight: 500;
       line-height: 1.4;
+    }
+    td.subject.expandable { cursor: pointer; }
+    td.subject .chevron {
+      display: inline-block;
+      width: 12px;
+      color: var(--text-faint);
+      transition: transform .15s, color .15s;
+      margin-right: .15rem;
+    }
+    td.subject.expanded .chevron {
+      transform: rotate(90deg);
+      color: var(--accent);
+    }
+    tr.body-row td {
+      padding: 0;
+      background: var(--surface-2);
+      border-top: 1px solid var(--accent);
+    }
+    iframe.body-frame {
+      width: 100%;
+      height: 480px;
+      border: 0;
+      display: block;
+      background: var(--surface);
     }
     .reason {
       font-family: var(--serif);

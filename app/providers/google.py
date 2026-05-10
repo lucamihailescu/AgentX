@@ -177,6 +177,31 @@ def _chunks(items: list[str], size: int):
         yield items[i:i + size]
 
 
+def _b64url_decode(data: str) -> str:
+    pad = "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(data + pad).decode("utf-8", errors="replace")
+    except (ValueError, TypeError):
+        return ""
+
+
+def _find_part_body(payload: dict, mime_type: str) -> str | None:
+    """Walk the recursive Gmail payload tree, returning the first body that
+    matches `mime_type` (decoded from base64url)."""
+    if not isinstance(payload, dict):
+        return None
+    if (payload.get("mimeType") or "").lower() == mime_type:
+        body = payload.get("body") or {}
+        data = body.get("data")
+        if data:
+            return _b64url_decode(data)
+    for part in payload.get("parts") or []:
+        found = _find_part_body(part, mime_type)
+        if found:
+            return found
+    return None
+
+
 class GoogleProvider(MailboxProvider):
     NAME: ClassVar[str] = "google"
     DISPLAY_NAME: ClassVar[str] = "Google (Gmail)"
@@ -445,3 +470,30 @@ class GoogleProvider(MailboxProvider):
             raise AuthError(
                 f"Gmail trash returned {resp.status_code}: {resp.text[:200]}"
             )
+
+    @classmethod
+    async def fetch_message_body(cls, user_id: str, message_id: str) -> dict:
+        token = await cls.acquire_access_token(user_id)
+        resp = await cls.request_with_retry(
+            "GET",
+            f"{_GMAIL_BASE}/users/me/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"format": "full"},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Gmail GET (body) returned {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json()
+        payload = data.get("payload") or {}
+        headers = payload.get("headers") or []
+        by_name = {h["name"].lower(): h.get("value", "") for h in headers}
+        from_raw = by_name.get("from") or ""
+        _, addr = parseaddr(from_raw)
+        return {
+            "subject": by_name.get("subject"),
+            "from": addr or None,
+            "received": _gmail_internaldate_to_iso(data.get("internalDate")),
+            "html": _find_part_body(payload, "text/html"),
+            "text": _find_part_body(payload, "text/plain"),
+        }

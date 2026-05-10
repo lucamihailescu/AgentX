@@ -186,3 +186,28 @@ class MicrosoftProvider(MailboxProvider):
             raise AuthError(
                 f"Graph DELETE returned {resp.status_code}: {resp.text[:200]}"
             )
+
+    @classmethod
+    async def fetch_message_body(cls, user_id: str, message_id: str) -> dict:
+        token = await cls.acquire_access_token(user_id)
+        resp = await cls.request_with_retry(
+            "GET",
+            f"{_GRAPH_BASE}/me/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"$select": "id,subject,from,receivedDateTime,body"},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Graph GET (body) returned {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json()
+        body = data.get("body") or {}
+        ctype = (body.get("contentType") or "").lower()
+        content = body.get("content") or ""
+        return {
+            "subject": data.get("subject"),
+            "from": (data.get("from") or {}).get("emailAddress", {}).get("address"),
+            "received": data.get("receivedDateTime"),
+            "html": content if ctype == "html" else None,
+            "text": content if ctype != "html" else None,
+        }

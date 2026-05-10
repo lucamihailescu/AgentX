@@ -299,6 +299,42 @@ async def _do_unsubscribe(target: dict) -> None:
     target["unsubscribed_at"] = datetime.now(timezone.utc).isoformat()
 
 
+@app.get("/ui/tasks/{task_id}/messages/{message_id}/body", response_class=HTMLResponse)
+async def ui_message_body(task_id: str, message_id: str, request: Request):
+    """Render a single message's body in a self-contained HTML doc, designed
+    to be loaded inside a sandboxed iframe. Strict CSP blocks scripts, images
+    (including tracking pixels), fonts, and external stylesheets."""
+    user_id = _require_user(request)
+    task = await _load_task(user_id, task_id)
+    _find_message(task, message_id)  # 404 if message isn't in this user's task
+    provider = await _user_provider(user_id)
+    try:
+        body = await provider.fetch_message_body(user_id, message_id)
+    except AuthError as exc:
+        raise HTTPException(status_code=502, detail=f"Body fetch failed: {exc}")
+    return templates.TemplateResponse(
+        "message_body.html",
+        {
+            "request": request,
+            "subject": body.get("subject"),
+            "from_addr": body.get("from"),
+            "received": body.get("received"),
+            "html_body": body.get("html"),
+            "text_body": body.get("text"),
+        },
+        headers={
+            "Content-Security-Policy": (
+                "default-src 'none'; "
+                "style-src 'unsafe-inline'; "
+                "img-src 'none'; font-src 'none'; "
+                "frame-ancestors 'self'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
+
+
 @app.post("/ui/tasks/{task_id}/messages/{message_id}/delete")
 async def ui_delete_message(task_id: str, message_id: str, request: Request):
     user_id = _require_user(request)

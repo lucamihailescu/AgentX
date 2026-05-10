@@ -186,3 +186,12 @@ class MailboxProvider:
     async def delete_message(cls, user_id: str, message_id: str) -> None:
         """Soft-delete (Trash / Deleted Items)."""
         raise NotImplementedError
+
+    @classmethod
+    async def fetch_message_body(cls, user_id: str, message_id: str) -> dict:
+        """Fetch the full body of a single message. Returns:
+            {"subject": str|None, "from": str|None, "received": str|None,
+             "html": str|None, "text": str|None}
+        Either `html` or `text` (or both) will be populated when available.
+        """
+        raise NotImplementedError
