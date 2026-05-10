@@ -105,15 +105,21 @@ class Worker:
                 task_id, status="processing", result_data=json.dumps(snapshot)
             )
 
+        async def on_page(page_messages: list[dict]) -> None:
+            # Stream per-page sender stats so /ui/senders updates live during
+            # the purge. Reuses the audit accumulator — it already knows how
+            # to bump `seen` for every walked message and `auto_deleted` for
+            # every match.
+            await sender_stats.record_audit_completion(
+                user_id, {"messages": page_messages}
+            )
+
         summary = await purge_mailbox(
-            provider, user_id, rules, on_progress=on_progress
+            provider, user_id, rules, on_progress=on_progress, on_page=on_page
         )
         await self._update(
             task_id, status="completed", result_data=json.dumps(summary)
         )
-        # Bump per-sender counters from the purge's deletions.
-        for m in summary.get("deleted_messages", []):
-            await sender_stats.bump_action(user_id, m.get("from"), deleted=1)
 
     @staticmethod
     async def _update(

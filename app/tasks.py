@@ -135,6 +135,7 @@ async def purge_mailbox(
     rules: dict[tuple[str, str], str] | None,
     *,
     on_progress=None,
+    on_page=None,
 ) -> dict:
     """Walk the entire mailbox in cursor-paginated batches and auto-delete
     every message that matches `BLOCKED_DOMAINS` or a `deny` rule.
@@ -184,6 +185,8 @@ async def purge_mailbox(
                         "rule_applied": m.get("rule_applied") or "blocklist",
                     })
 
+        if on_page is not None:
+            await on_page(processed)
         if on_progress is not None:
             await on_progress(summary)
 

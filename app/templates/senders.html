@@ -25,6 +25,7 @@
               <th style="width: 80px">spam</th>
               <th style="width: 90px">spam %</th>
               <th style="width: 80px">deleted</th>
+              <th style="width: 90px">auto-del</th>
               <th style="width: 90px">unsub</th>
               <th style="width: 170px">last seen</th>
               <th style="width: 200px"></th>
@@ -40,6 +41,7 @@
                   {% if r.seen %}{{ '%.0f' | format(r.spam / r.seen * 100) }}%{% else %}—{% endif %}
                 </td>
                 <td class="mono">{{ r.deleted }}</td>
+                <td class="mono">{{ r.auto_deleted }}</td>
                 <td class="mono">{{ r.unsubscribed }}</td>
                 <td class="meta mono" style="font-size: .73rem">{{ r.last_seen or '—' }}</td>
                 <td style="text-align: right">

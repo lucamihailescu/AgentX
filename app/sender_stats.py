@@ -108,7 +108,12 @@ async def bump_action(
     deleted: int = 0,
     unsubscribed: int = 0,
 ) -> None:
-    """Bump per-action counters (called from main.py on UI-driven actions)."""
+    """Bump per-action counters (called from main.py on UI-driven actions).
+
+    Uses the same UPSERT as `record_audit_completion` so the row gets created
+    when this is the first time we see the sender (which can happen if the
+    user runs a cleanup before any audit has aggregated them).
+    """
     targets = _targets_for(sender or "")
     if not targets or (deleted == 0 and unsubscribed == 0):
         return
@@ -116,12 +121,17 @@ async def bump_action(
     async with aiosqlite.connect(settings.db_path) as db:
         for target_type, target in targets:
             await db.execute(
-                """UPDATE sender_stats SET
-                       deleted = deleted + ?,
-                       unsubscribed = unsubscribed + ?,
-                       updated_at = ?
-                   WHERE user_id = ? AND target_type = ? AND target = ?""",
-                (deleted, unsubscribed, now, user_id, target_type, target),
+                _UPSERT_SQL,
+                (
+                    user_id, target, target_type,
+                    0,           # seen
+                    0,           # spam
+                    deleted,
+                    unsubscribed,
+                    0,           # auto_deleted
+                    None,        # last_seen
+                    now,
+                ),
             )
         await db.commit()
 
@@ -138,7 +148,7 @@ async def list_top(
                       auto_deleted, last_seen
                FROM sender_stats
                WHERE user_id = ? AND target_type = ?
-               ORDER BY spam DESC, seen DESC
+               ORDER BY spam DESC, auto_deleted DESC, seen DESC
                LIMIT ?""",
             (user_id, target_type, limit),
         )
