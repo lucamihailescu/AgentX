@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
+from email.parser import BytesParser
+from email.policy import default as default_policy
 from email.utils import parseaddr, parsedate_to_datetime
 from typing import ClassVar
 from urllib.parse import urlencode
@@ -22,9 +23,10 @@ from .base import AuthError, MailboxProvider, Message
 _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 _GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1"
+_BATCH_ENDPOINT = "https://gmail.googleapis.com/batch/gmail/v1"
 _PAGE_SIZE = 50
+_BATCH_SIZE = 100  # Gmail caps batch requests at 100 sub-requests
 _TOKEN_REFRESH_LEEWAY_S = 60
-_FETCH_CONCURRENCY = 5
 
 # Headers we ask Gmail to surface on the metadata-format `messages.get` call.
 _METADATA_HEADERS = (
@@ -75,6 +77,104 @@ def _iso_to_epoch_seconds(iso: str | None) -> int | None:
         return int(dt.timestamp())
     except ValueError:
         return None
+
+
+def _build_batch_body(ids: list[str], boundary: str) -> bytes:
+    """Build a multipart/mixed body for Gmail's /batch endpoint — one
+    sub-request per message id, asking for `format=metadata` with the
+    headers we care about.
+    """
+    qs = "&".join(f"metadataHeaders={h}" for h in _METADATA_HEADERS)
+    parts: list[bytes] = []
+    for mid in ids:
+        sub = (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/http\r\n"
+            f"Content-ID: <item-{mid}>\r\n"
+            f"\r\n"
+            f"GET /gmail/v1/users/me/messages/{mid}?format=metadata&{qs}\r\n"
+            f"\r\n"
+        )
+        parts.append(sub.encode())
+    parts.append(f"--{boundary}--\r\n".encode())
+    return b"".join(parts)
+
+
+def _parse_inner_http(inner: bytes) -> tuple[int, bytes]:
+    """Pull (status_code, body) out of one batch sub-response's payload.
+    Returns (0, b"") on parse failure.
+    """
+    try:
+        status_line, rest = inner.split(b"\r\n", 1)
+        _headers, body = rest.split(b"\r\n\r\n", 1)
+        return int(status_line.split()[1]), body
+    except (ValueError, IndexError):
+        return 0, b""
+
+
+def _parse_batch_response(content_type: str, body: bytes) -> dict[str, dict]:
+    """Parse Gmail's multipart/mixed batch response into a {message_id: data} map.
+
+    Each sub-response carries a `Content-ID: <response-item-<mid>>` header
+    that mirrors the request's `<item-<mid>>` Content-ID with a `response-`
+    prefix added by Gmail.
+    """
+    full = (b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body)
+    msg = BytesParser(policy=default_policy).parsebytes(full)
+    out: dict[str, dict] = {}
+    if not msg.is_multipart():
+        return out
+    for part in msg.iter_parts():
+        cid = (part.get("Content-ID") or "").strip().strip("<>")
+        if cid.startswith("response-item-"):
+            mid = cid[len("response-item-"):]
+        elif cid.startswith("item-"):
+            mid = cid[len("item-"):]
+        else:
+            continue
+        inner = part.get_payload(decode=True)
+        if not isinstance(inner, bytes):
+            continue
+        status, body_bytes = _parse_inner_http(inner)
+        if status != 200:
+            continue
+        try:
+            out[mid] = json.loads(body_bytes)
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _message_from_metadata(mid: str, data: dict) -> Message:
+    payload_headers = (data.get("payload") or {}).get("headers") or []
+    by_name = {h["name"].lower(): h.get("value", "") for h in payload_headers}
+
+    from_raw = by_name.get("from") or ""
+    _, addr = parseaddr(from_raw)
+    received_iso = _gmail_internaldate_to_iso(data.get("internalDate"))
+    if not received_iso and by_name.get("date"):
+        try:
+            received_iso = parsedate_to_datetime(by_name["date"]).isoformat()
+        except (TypeError, ValueError):
+            received_iso = None
+
+    unsub = find_unsubscribe(
+        [{"name": h["name"], "value": h.get("value", "")} for h in payload_headers]
+    )
+    return Message(
+        id=mid,
+        subject=by_name.get("subject"),
+        from_address=addr or None,
+        received=received_iso,
+        preview=data.get("snippet"),
+        unsubscribe_url=unsub["url"] if unsub else None,
+        unsubscribe_one_click=unsub["one_click"] if unsub else False,
+    )
+
+
+def _chunks(items: list[str], size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
 class GoogleProvider(MailboxProvider):
@@ -289,54 +389,47 @@ class GoogleProvider(MailboxProvider):
         if not ids:
             return []
 
-        # 2) hydrate metadata for each id with bounded concurrency
-        sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
+        # 2) hydrate metadata via Gmail's /batch endpoint — one HTTP round-trip
+        #    per chunk of <= _BATCH_SIZE message ids instead of one per id.
+        out: list[Message] = []
+        for chunk in _chunks(ids, _BATCH_SIZE):
+            data_by_id = await cls._batch_fetch_metadata(token, chunk)
+            for mid in chunk:
+                data = data_by_id.get(mid)
+                if data is None:
+                    continue  # 404, parse failure, or sub-response error
+                out.append(_message_from_metadata(mid, data))
+        return out
 
-        async def _fetch_one(mid: str) -> Message | None:
-            params = [("format", "metadata")]
-            for h in _METADATA_HEADERS:
-                params.append(("metadataHeaders", h))
-            async with sem:
-                resp = await cls.request_with_retry(
-                    "GET",
-                    f"{_GMAIL_BASE}/users/me/messages/{mid}",
-                    headers=headers,
-                    params=params,
-                )
-            if resp.status_code == 404:
-                return None
-            if resp.status_code >= 400:
-                raise AuthError(
-                    f"Gmail get returned {resp.status_code}: {resp.text[:200]}"
-                )
-            data = resp.json()
-            payload_headers = (data.get("payload") or {}).get("headers") or []
-            by_name = {h["name"].lower(): h.get("value", "") for h in payload_headers}
+    @classmethod
+    async def _batch_fetch_metadata(
+        cls, token: str, ids: list[str]
+    ) -> dict[str, dict]:
+        """POST a multipart/mixed batch to Gmail and return {id: response_json}.
 
-            from_raw = by_name.get("from") or ""
-            _, addr = parseaddr(from_raw)
-            received_iso = _gmail_internaldate_to_iso(data.get("internalDate"))
-            if not received_iso and by_name.get("date"):
-                try:
-                    received_iso = parsedate_to_datetime(by_name["date"]).isoformat()
-                except (TypeError, ValueError):
-                    received_iso = None
-
-            unsub = find_unsubscribe(
-                [{"name": h["name"], "value": h.get("value", "")} for h in payload_headers]
+        Sub-responses with non-200 status are silently dropped so the caller
+        sees a partial result rather than a hard failure.
+        """
+        if not ids:
+            return {}
+        boundary = f"batch_{secrets.token_hex(8)}"
+        body = _build_batch_body(ids, boundary)
+        resp = await cls.request_with_retry(
+            "POST",
+            _BATCH_ENDPOINT,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": f"multipart/mixed; boundary={boundary}",
+            },
+            content=body,
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Gmail batch returned {resp.status_code}: {resp.text[:200]}"
             )
-            return Message(
-                id=mid,
-                subject=by_name.get("subject"),
-                from_address=addr or None,
-                received=received_iso,
-                preview=data.get("snippet"),
-                unsubscribe_url=unsub["url"] if unsub else None,
-                unsubscribe_one_click=unsub["one_click"] if unsub else False,
-            )
-
-        results = await asyncio.gather(*(_fetch_one(mid) for mid in ids))
-        return [m for m in results if m is not None]
+        return _parse_batch_response(
+            resp.headers.get("content-type", ""), resp.content
+        )
 
     @classmethod
     async def delete_message(cls, user_id: str, message_id: str) -> None:

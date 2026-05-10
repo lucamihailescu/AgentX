@@ -101,19 +101,28 @@ class MailboxProvider:
         params: Any = None,
         data: Any = None,
         json: Any = None,
+        content: Any = None,
         max_attempts: int = 5,
     ) -> httpx.Response:
         """HTTP request that retries on 429 / 503 with exponential backoff.
 
         Honors `Retry-After` when the server provides it; otherwise uses
         `1 → 2 → 4 → 8 → 16` seconds with up-to-500ms jitter, capped at 60s.
+        Pass `content=` for raw bytes (e.g. multipart/mixed batch bodies);
+        `data=` for form-encoded; `json=` for JSON bodies.
         """
         client = cls.http_client()
         delay = 1.0
         last_resp: httpx.Response | None = None
         for attempt in range(1, max_attempts + 1):
             resp = await client.request(
-                method, url, headers=headers, params=params, data=data, json=json
+                method,
+                url,
+                headers=headers,
+                params=params,
+                data=data,
+                json=json,
+                content=content,
             )
             if resp.status_code not in (429, 503):
                 return resp

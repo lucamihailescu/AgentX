@@ -38,7 +38,7 @@ So this codebase drops the sidecar and goes straight to MSAL. The "long-running"
 | `app/auth.py` | Provider-agnostic infrastructure: Fernet encryption for `users.cache_blob`, provider lookup, CLI token signer |
 | `app/providers/base.py` | `MailboxProvider` abstract base + `Message` dataclass — the shared contract between the pipeline and any backend |
 | `app/providers/microsoft.py` | MSAL + Microsoft Graph implementation |
-| `app/providers/google.py` | OAuth 2.0 (PKCE) + Gmail REST API implementation |
+| `app/providers/google.py` | OAuth 2.0 (PKCE) + Gmail REST API implementation. Hydrates message metadata via Gmail's `/batch/gmail/v1` endpoint (multipart/mixed, ≤100 sub-requests/round-trip) instead of one HTTP call per id. |
 | `app/rules.py` | Per-user `sender_rules` CRUD + lookup helper. Address rules win over domain rules. |
 | `app/tasks.py` | Pipeline: fetch via provider → auto-delete blocked → apply sender rules → classify remaining via Ollama → build report dict |
 | `app/ollama_client.py` | Async client for `POST {OLLAMA_URL}/api/generate` with `format=json`; defensive parsing |
