@@ -293,6 +293,7 @@ async def ui_task_detail(task_id: str, request: Request):
         and (m.get("spam") is True or m.get("spam") is None)
         and not m.get("deleted")
         and not m.get("auto_deleted")
+        and not m.get("rule_applied")
         for m in (task["result"] or {}).get("messages", [])
     )
     return templates.TemplateResponse(
@@ -447,20 +448,32 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
     do_rule = action in {"allow", "deny"}
 
     if do_rule:
-        seen: set[str] = set()
+        senders_for_rule: set[str] = set()
         for target in targets:
             sender = (target.get("from") or "").strip().lower()
-            if not sender or sender in seen:
+            if not sender or sender in senders_for_rule:
                 continue
-            seen.add(sender)
+            senders_for_rule.add(sender)
             try:
                 await rules_module.upsert_rule(user_id, sender, "address", action)
             except ValueError:
                 continue
-            target["rule_applied"] = action
+        # Propagate the verdict to every same-sender row in the audit so
+        # they stop appearing as actionable. Only senders we successfully
+        # added a rule for (senders_for_rule) — failed upserts don't taint
+        # the rest of the report.
+        for m in task["result"].get("messages", []):
+            if (m.get("from") or "").strip().lower() not in senders_for_rule:
+                continue
+            if m.get("deleted") or m.get("auto_deleted"):
+                continue
+            m["rule_applied"] = action
             if action == "allow":
-                target["spam"] = False
-                target["reason"] = "allowlisted sender"
+                m["spam"] = False
+                m["reason"] = "allowlisted sender"
+            else:
+                m["spam"] = True
+                m["reason"] = "denylisted sender"
 
     bumps: list[tuple[str | None, int, int]] = []  # (sender, deleted, unsub)
 
@@ -520,18 +533,29 @@ async def ui_set_rule(task_id: str, message_id: str, verdict: str, request: Requ
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    target["rule_applied"] = verdict
+    # Propagate the rule to every same-sender row in this audit so they
+    # stop appearing as actionable spam in the UI. No extra API calls — for
+    # `deny`, only the clicked message is removed via Graph/Gmail; the
+    # rest get cleaned up by the next audit or a manual cleanup.
+    for m in task["result"].get("messages", []):
+        if (m.get("from") or "").strip().lower() != sender:
+            continue
+        if m.get("deleted") or m.get("auto_deleted"):
+            continue
+        m["rule_applied"] = verdict
+        if verdict == "allow":
+            m["spam"] = False
+            m["reason"] = "allowlisted sender"
+        else:
+            m["spam"] = True
+            m["reason"] = "denylisted sender"
+
     bumped_delete = 0
-    if verdict == "allow":
-        target["spam"] = False
-        target["reason"] = "allowlisted sender"
-    else:
-        if not target.get("deleted"):
-            await _delete_message(user_id, message_id)
-            target["deleted"] = True
-            target["deleted_at"] = datetime.now(timezone.utc).isoformat()
-            bumped_delete = 1
-        target["reason"] = "denylisted sender"
+    if verdict == "deny" and not target.get("deleted"):
+        await _delete_message(user_id, message_id)
+        target["deleted"] = True
+        target["deleted_at"] = datetime.now(timezone.utc).isoformat()
+        bumped_delete = 1
 
     await _save_result(task_id, task["result"])
     if bumped_delete:
