@@ -454,6 +454,26 @@
       background: transparent;
       color: var(--text-muted);
     }
+
+    /* ───── citation badges (chat) ───── */
+    a.citation {
+      display: inline-block;
+      padding: .05rem .4rem;
+      margin: 0 .1rem;
+      font-family: var(--mono);
+      font-size: .82em;
+      color: var(--accent);
+      background: var(--accent-tint);
+      border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+      border-radius: 3px;
+      text-decoration: none;
+      vertical-align: baseline;
+    }
+    a.citation:hover {
+      background: var(--accent);
+      color: var(--bg);
+      border-color: var(--accent);
+    }
     button.small.ghost:hover {
       color: var(--text);
       background: var(--surface-2);
@@ -641,6 +661,7 @@
           <a href="/" class="nav-link">audits</a>
           <a href="/ui/senders" class="nav-link">senders</a>
           <a href="/ui/rules" class="nav-link">rules</a>
+          <a href="/ui/chat" class="nav-link">chat</a>
           <a href="/ui/settings" class="nav-link">settings</a>
           <span class="nav-sep">·</span>
           <span>{{ username }}</span>

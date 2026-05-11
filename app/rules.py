@@ -1,10 +1,26 @@
 """Per-user sender allow/deny rules.
 
-`address` rules match exact email addresses (case-insensitive).
-`domain`  rules match the domain part and any subdomain.
-Address rules take precedence over domain rules; a `deny` address overrides
-an `allow` for its parent domain.
+Four target types, evaluated in priority order (first match wins):
+
+1. ``address``           — exact email-address match (case-insensitive).
+2. ``domain``            — exact domain or any parent domain.
+3. ``address_contains``  — case-insensitive substring of the email address.
+                           Useful for addresses with stable substrings inside
+                           rotating wrappers (e.g. iCloud forwarding aliases
+                           that embed the original sender as
+                           ``hello_at_mail_<sender>_com_<rotating>@icloud.com``).
+4. ``subject_contains``  — case-insensitive substring of the subject. Catches
+                           senders that rotate addresses but reuse subject
+                           lines like "Tomorrow's Menu on …".
+
+Within each tier a deny overrides an allow only if both happen to share the
+same target — but in practice each (target_type, target) pair carries one
+verdict. Tier-1 (exact address) overrides tier-2 (domain) by virtue of order.
 """
+
+_VALID_TARGET_TYPES = frozenset({
+    "address", "domain", "address_contains", "subject_contains",
+})
 
 from datetime import datetime, timezone
 
@@ -44,7 +60,7 @@ async def load_rule_index(user_id: str) -> dict[tuple[str, str], str]:
 async def upsert_rule(
     user_id: str, target: str, target_type: str, verdict: str
 ) -> None:
-    if target_type not in {"address", "domain"}:
+    if target_type not in _VALID_TARGET_TYPES:
         raise ValueError(f"invalid target_type: {target_type}")
     if verdict not in {"allow", "deny"}:
         raise ValueError(f"invalid verdict: {verdict}")
@@ -71,21 +87,44 @@ async def delete_rule(user_id: str, target: str, target_type: str) -> None:
         await db.commit()
 
 
-def lookup(rules: dict[tuple[str, str], str], address: str | None) -> str | None:
-    """Return 'allow' / 'deny' / None for the given sender address.
-
-    Exact-address match wins over domain match.
+def lookup(
+    rules: dict[tuple[str, str], str],
+    address: str | None,
+    subject: str | None = None,
+) -> str | None:
+    """Return 'allow' / 'deny' / None for a message based on its sender
+    address and (optionally) subject. Tiers evaluated in priority order:
+    exact address → exact domain → address substring → subject substring.
     """
-    if not address:
-        return None
-    addr, domain = _split_address(address)
-    v = rules.get(("address", addr))
-    if v:
-        return v
-    if domain:
-        parts = domain.split(".")
-        for i in range(len(parts)):
-            v = rules.get(("domain", ".".join(parts[i:])))
-            if v:
-                return v
+    addr_lower = (address or "").strip().lower()
+
+    # Tier 1 — exact address.
+    if addr_lower:
+        v = rules.get(("address", addr_lower))
+        if v:
+            return v
+
+    # Tier 2 — exact domain (and any parent domain).
+    if addr_lower and "@" in addr_lower:
+        domain = addr_lower.split("@", 1)[-1]
+        if domain:
+            parts = domain.split(".")
+            for i in range(len(parts)):
+                v = rules.get(("domain", ".".join(parts[i:])))
+                if v:
+                    return v
+
+    # Tier 3 — address substring (catches rotating-suffix wrappers).
+    if addr_lower:
+        for (tt, t), verdict in rules.items():
+            if tt == "address_contains" and t in addr_lower:
+                return verdict
+
+    # Tier 4 — subject substring (catches rotating-sender campaigns).
+    subj_lower = (subject or "").strip().lower()
+    if subj_lower:
+        for (tt, t), verdict in rules.items():
+            if tt == "subject_contains" and t in subj_lower:
+                return verdict
+
     return None

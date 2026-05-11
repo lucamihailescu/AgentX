@@ -45,6 +45,7 @@ So this codebase drops the sidecar and goes straight to MSAL. The "long-running"
 | `app/worker.py` | Two background loops: `Worker` claims queued rows and runs the pipeline; `Scheduler` queues new audits per user on a configurable interval |
 | `app/templates/` | Jinja2 templates: `base.html`, `login.html`, `index.html`, `task.html`, `rules.html`, `senders.html`, `settings.html` |
 | `app/sender_stats.py` | Per-user / per-domain aggregate counters (precomputed by the worker; bumped on user actions) — backs `/ui/senders` with a single indexed SELECT instead of scanning every audit's JSON. |
+| `app/chat.py` | mem0-backed chat assistant. Ollama for chat LLM + embeddings (`nomic-embed-text`); Qdrant sidecar for vectors. Loads inbox-state context + retrieved memories per turn; updates memory in the background. Degrades gracefully to stateless chatbot if mem0/Qdrant init fails. |
 | `app/db.py` | SQLite schema (`users`, `tasks`, `sender_rules`, `sender_stats`); idempotent ALTERs for forward-compat |
 | `app/config.py` | Pydantic settings loaded from `AGENT_*` env vars |
 
@@ -113,6 +114,9 @@ Then in a browser: <http://localhost:8080> → "Sign in with Microsoft" → land
 | GET | `/ui/senders` | session | Aggregated stats per sender / domain across every audit, with one-click allow/block. |
 | GET | `/ui/settings` | session | View / change scheduled-audit interval. |
 | POST | `/ui/settings` | session | Save scheduled-audit interval. |
+| GET | `/ui/chat` | session | Conversational interface to the agent (mem0-backed). |
+| POST | `/ui/chat/send` | session | Form action — sends a user message, returns 303 to `/ui/chat`. Memory update runs as a background task. |
+| POST | `/ui/chat/clear` | session | Wipes the user's chat history (mem0 memories are kept — they outlive any single conversation). |
 
 ### JSON API
 
@@ -281,6 +285,10 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_OLLAMA_TEMPERATURE` | `0.0` | Classifier sampling temperature. `0` = deterministic verdicts. |
 | `AGENT_OLLAMA_NUM_PREDICT` | `200` | Cap on output tokens per call. JSON verdict is well under 100 tokens. |
 | `AGENT_OLLAMA_EXAMPLES_PER_CLASS` | `3` | Number of few-shot examples per class (spam + ham) drawn from past audits. `0` disables few-shot prompting. Each example ≈ 80 tokens; with `num_ctx=1024`, stay ≤ 4. |
+| `AGENT_CHAT_MODEL` | *(falls back to `AGENT_OLLAMA_MODEL`)* | Ollama model used for the chat assistant. Leave unset to share the same model as the spam classifier. Override only when you want a different (typically larger) model for chat. Should support a reasonable context window (4k+) since chat messages prepend mailbox-state context + memories. |
+| `AGENT_EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model used by mem0 to vectorize memories. Pull with `ollama pull nomic-embed-text` before first chat. |
+| `AGENT_EMBED_DIMS` | `768` | Embedding dimension. Must match the embed model — `nomic-embed-text` = 768. |
+| `AGENT_QDRANT_HOST` / `AGENT_QDRANT_PORT` | `qdrant` / `6333` | Where mem0 finds Qdrant. The compose service is named `qdrant` and stays on the internal network. |
 | `AGENT_MAX_MESSAGES_PER_AUDIT` | `200` | Cap on messages fetched per audit. Agent walks `@odata.nextLink` 50 messages at a time up to this number. Use **Next page** on a finished audit to keep walking older mail. |
 | `AGENT_BLOCKED_DOMAINS` | *(empty)* | Comma-separated sender domains whose mail is auto-deleted at fetch time. Subdomain matching enabled. |
 | `AGENT_SUGGEST_BLOCK_THRESHOLD` | `3` | Min combined manual `deleted + unsubscribed` actions against a sender before the home page suggests a deny rule. |
@@ -292,11 +300,15 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 
 The model misclassifies sometimes — a newsletter you actually want gets flagged spam, or a relentless marketer keeps slipping through. Rules close the feedback loop:
 
-- **Address rule** (`user@example.com`) — exact match.
-- **Domain rule** (`example.com`) — matches that domain and any subdomain.
+- **`address`** (`user@example.com`) — exact match.
+- **`domain`** (`example.com`) — exact match plus any subdomain.
+- **`address_contains`** (e.g. `mealpal`) — case-insensitive substring of the sender's email address. Catches senders that rotate the local-part but keep a stable identifier inside it (iCloud forwarding aliases like `hello_at_mail_mealpal_com_…@icloud.com`).
+- **`subject_contains`** (e.g. `Tomorrow's Menu on`) — case-insensitive substring of the subject. Catches campaigns that rotate the sender address entirely but reuse the subject line.
 - **Verdict**:
   - `allow` — skip Ollama, mark `ok`.
-  - `deny` — **auto-delete on every future audit**. Behaves like the env-level `BLOCKED_DOMAINS` for that one sender. Existing audit reports are immutable snapshots and won't retroactively delete; the next audit applies the rule.
+  - `deny` — **auto-delete on every future audit**. Behaves like the env-level `BLOCKED_DOMAINS` for that one matcher. Existing audit reports are immutable snapshots and won't retroactively delete; the next audit applies the rule.
+
+**Match priority** (first match wins): `address` → `domain` → `address_contains` → `subject_contains`. So an exact-address allow overrides a parent-domain deny, and a domain rule overrides a substring rule.
 
 Per-row buttons inside an audit (✓ allow / ✕ block) create address rules from the message's `from`. Bulk variants (`allow sender` / `block sender` in the toolbar) create one rule per unique sender across the selection. The full set is editable on **`/ui/rules`** — and the **`/ui/senders`** page surfaces aggregate counts so you can spot which domains keep showing up.
 
@@ -312,6 +324,67 @@ Two ways to set the interval, with **per-user override taking precedence**:
 If neither is set, scheduling is disabled. The interval is in minutes — `15` for "every 15 minutes", `60` for hourly, `360` for every 6h. The scheduler tick rate (`AGENT_SCHEDULER_TICK_SECONDS`, default 60s) bounds the precision; lower it if you want sub-minute scheduling.
 
 This pairs naturally with rules + the domain blocklist: once you've trained the system, scheduled audits can run unattended and the inbox stays clean.
+
+## Chat assistant
+
+`/ui/chat` is a conversational interface to your inbox. Ask it:
+
+- *"What spam from MealPal did I get this week?"*
+- *"How many rules do I have? List the deny ones."*
+- *"Who are my top 5 spammiest senders right now?"*
+- *"What did the model say about the message from `foo@bar.com` in the last audit?"*
+
+**Architecture**
+- **LLM:** Ollama (`AGENT_CHAT_MODEL`, falls back to `AGENT_OLLAMA_MODEL`).
+- **Embeddings:** Ollama (`AGENT_EMBED_MODEL`, default `nomic-embed-text` — must be pulled separately).
+- **Vector store:** Qdrant (compose sidecar; container only on the internal network).
+- **Memory layer:** [mem0](https://github.com/mem0ai/mem0). Each chat turn:
+  1. Loads inbox-state context — most recent **5 audit IDs** (in `[audit:<uuid>]` form, so the model can cite them inline), rule counts, top spammy senders — from SQLite.
+  2. Calls `memory.search(user_message)` for the top-K relevant memories about the user.
+  3. **Streams** the reply token-by-token from Ollama's `/api/chat?stream=true` straight to the browser via a `text/plain` response body the JS reader consumes incrementally.
+  4. Persists the reply, returns to UI, then via `asyncio.create_task` calls `memory.add(messages)` so mem0 distills new memories from the turn.
+
+**Streaming + citation behavior**
+- The chat page hijacks the form submit with `fetch()` and reads the response body as a `ReadableStream`, appending text to an assistant bubble as it arrives. Cmd/Ctrl-Enter sends; the textarea and send button are disabled during the stream so duplicates aren't possible.
+- After the stream completes, the JS post-processes any `[audit:<uuid>]` tokens into clickable links via `document.createElement` (no `innerHTML`). The same conversion runs server-side via the `citations` Jinja filter on rehydrated history, so historical messages show the same links after a reload.
+- Without JS, the form falls back to a normal POST that blocks on the full reply and returns a 303 redirect.
+
+**Tool calling — actually doing things from chat**
+
+The chat agent has four tools wired in. Ask it to *do* something and it'll execute the action and report back:
+
+| Tool | What it does | Example phrasing |
+| --- | --- | --- |
+| `start_audit` | Queues a new audit (top-N most recent). | *"Start an audit."* |
+| `run_cleanup` | Queues a purge (entire mailbox, blocklist + deny rules only — no Ollama). | *"Clean up everything that matches my rules."* |
+| `next_page` | Queues a follow-up audit older than a given parent audit. | *"Get the next page of [audit:a7e24585-…]."* |
+| `add_rule` | Adds an `address` / `domain` / `address_contains` / `subject_contains` rule with `allow` or `deny`. | *"Always block any email subject containing 'MealPal'."* |
+
+Per turn, the agent loops up to 5 times (LLM → tool calls → tool results → LLM →…). The chat UI streams a *progress feed* during the loop:
+```
+→ calling start_audit({})
+  ↳ {"ok": true, "task_id": "a7e24585-…", "kind": "audit", "status": "queued"}
+
+Started a new audit [audit:a7e24585-…]. It's queued and should complete in a couple minutes.
+```
+
+**Important:** Ollama's tool support requires `stream: false` on the LLM call, so the model's reply text isn't token-streamed any more. We make up for it by streaming the tool-call progress lines (you see *what's happening* in real time, even if the words come at once).
+
+**Tool calling needs a model that supports it.** Llama 3.1+, Llama 3.2, Qwen 2.5, Mistral Nemo, and similar work. Models without tool support (some Gemma builds, older Llama 2) will return a 400 from Ollama; the chat shows the raw error and you can switch `OLLAMA_MODEL` to something tool-capable.
+
+**Prereqs before first use**
+
+```bash
+ollama pull llama3.2          # if not already
+ollama pull nomic-embed-text  # required for embeddings
+```
+
+The first chat message after a cold start may take ~10s while mem0 initializes the Qdrant collection. Subsequent turns are bounded by Ollama latency.
+
+**Failure modes**
+- If Qdrant isn't reachable, chat still works — it just runs as a stateless chatbot (no persistent preferences across sessions). The agent log will say `mem0 init failed (...); chat will run without persistent memory`.
+- If Ollama is down or the embed model isn't pulled, the first chat attempt fails with a 502; subsequent attempts retry.
+- If Ollama's `/api/chat` returns slowly (large context), the user message is persisted *first* so it doesn't disappear on a UI reload.
 
 ## Recovery
 

@@ -17,10 +17,12 @@
   <div class="panel" style="margin: 1.5rem 0">
     <h2 style="margin-top: 0; font-size: 1rem">Add rule</h2>
     <form method="post" action="/ui/rules/add" class="rule-form">
-      <input type="text" name="target" placeholder="user@example.com or example.com" required>
-      <select name="target_type">
-        <option value="address">address</option>
-        <option value="domain">domain</option>
+      <input type="text" name="target" placeholder="user@example.com  ·  example.com  ·  mealpal" required>
+      <select name="target_type" title="What to match against">
+        <option value="address">address (exact)</option>
+        <option value="domain">domain (exact + subdomains)</option>
+        <option value="address_contains">address contains</option>
+        <option value="subject_contains">subject contains</option>
       </select>
       <select name="verdict">
         <option value="allow">allow</option>
@@ -28,6 +30,15 @@
       </select>
       <button type="submit" class="primary">add</button>
     </form>
+
+    <p class="meta" style="margin: .85rem 0 0; max-width: 64ch; font-size: .82rem">
+      Use <code>address contains</code> for senders whose local-part has a stable
+      substring inside a rotating wrapper (e.g. iCloud forwarding aliases like
+      <code>hello_at_mail_<strong>mealpal</strong>_com_…@icloud.com</code>).
+      Use <code>subject contains</code> when the sender rotates entirely but the
+      subject is recognizable (e.g. "Tomorrow's Menu on MealPal"). Both are
+      case-insensitive.
+    </p>
   </div>
 
   {% if rules %}
@@ -52,7 +63,7 @@
                   <span class="pill spam">deny</span>
                 {% endif %}
               </td>
-              <td><code class="meta" style="font-size: .75rem">{{ r.target_type }}</code></td>
+              <td><code class="meta" style="font-size: .75rem">{{ r.target_type | replace('_', ' ') }}</code></td>
               <td><code>{{ r.target }}</code></td>
               <td class="meta mono" style="font-size: .75rem">{{ r.created_at }}</td>
               <td style="text-align: right">

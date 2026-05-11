@@ -33,6 +33,18 @@ class Settings(BaseSettings):
     ollama_num_predict: int = 200
     ollama_examples_per_class: int = 3
 
+    # Chat (mem0 + Ollama embeddings + Qdrant) ─────────────────────────────
+    # Falls back to `ollama_model` when unset/empty so a single OLLAMA_MODEL
+    # env var configures both the classifier and the chat. Override only to
+    # use a different (typically larger) model for chat.
+    chat_model: str | None = None
+    embed_model: str = "nomic-embed-text"
+    embed_dims: int = 768
+    qdrant_host: str = "qdrant"
+    qdrant_port: int = 6333
+    chat_history_window: int = 12         # turns of recent history sent to LLM
+    chat_memory_top_k: int = 5            # mem0 results injected into prompt
+
     # Comma-separated; parsed into BLOCKED_DOMAINS below. Kept as a raw string
     # to avoid pydantic-settings auto-JSON-decoding it.
     blocked_domains: str = ""

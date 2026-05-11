@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS suggestion_dismissals (
     PRIMARY KEY (user_id, target_type, target, suggestion_kind)
 );
 CREATE INDEX IF NOT EXISTS idx_dismissals_user ON suggestion_dismissals(user_id);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL,                -- 'user' or 'assistant'
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_user_time
+    ON chat_messages(user_id, created_at);
 """
 
 _FORWARD_COMPAT_ALTERS = (

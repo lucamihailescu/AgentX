@@ -1,15 +1,17 @@
 import asyncio
 import json
 import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup, escape
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -22,6 +24,7 @@ from .auth import (
 )
 from .config import settings
 from .db import init_db
+from . import chat as chat_module
 from . import rules as rules_module
 from . import sender_stats
 from . import suggestions
@@ -34,6 +37,29 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("agentx")
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+
+_AUDIT_CITATION_RE = re.compile(
+    r"\[audit:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]"
+)
+
+
+def render_citations(text: str) -> Markup:
+    """Convert `[audit:<uuid>]` tokens in chat content into clickable links.
+    Operates on already-HTML-escaped text so the surrounding content stays
+    safe; `Markup(...)` marks the result trusted for Jinja."""
+    safe = str(escape(text))
+    rendered = _AUDIT_CITATION_RE.sub(
+        lambda m: (
+            f'<a href="/ui/tasks/{m.group(1)}" class="citation">'
+            f'audit {m.group(1)[:8]}</a>'
+        ),
+        safe,
+    )
+    return Markup(rendered)
+
+
+templates.env.filters["citations"] = render_citations
 
 
 class CreateTaskResponse(BaseModel):
@@ -142,8 +168,9 @@ async def index(request: Request):
             for p in PROVIDERS.values() if p.is_configured()
         ]
         return templates.TemplateResponse(
+            request,
             "login.html",
-            {"request": request, "providers": provider_buttons},
+            {"providers": provider_buttons},
         )
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
@@ -156,9 +183,9 @@ async def index(request: Request):
         rows = [dict(r) for r in await cur.fetchall()]
     block_suggestions = await suggestions.list_block_suggestions(user_id)
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
             "tasks": rows,
             "block_suggestions": block_suggestions,
             "username": request.session.get("username"),
@@ -257,12 +284,24 @@ async def ui_task_detail(task_id: str, request: Request):
     user_id = _require_user(request)
     task = await _load_task(user_id, task_id)
     raw_json = json.dumps(task["result"], indent=2) if task["result"] else None
+    # A message is "actionable" if the user might still want to teach the
+    # system about it: spam-flagged or unclassified (Ollama failure / no
+    # verdict), not yet deleted or auto-deleted. Already-allowed/denied
+    # senders are excluded because the rule is in place.
+    has_actionable = bool(task["result"]) and any(
+        m.get("id")
+        and (m.get("spam") is True or m.get("spam") is None)
+        and not m.get("deleted")
+        and not m.get("auto_deleted")
+        for m in (task["result"] or {}).get("messages", [])
+    )
     return templates.TemplateResponse(
+        request,
         "task.html",
         {
-            "request": request,
             "task": task,
             "raw_json": raw_json,
+            "has_actionable": has_actionable,
             "username": request.session.get("username"),
         },
     )
@@ -324,9 +363,9 @@ async def ui_message_body(task_id: str, message_id: str, request: Request):
     except AuthError as exc:
         raise HTTPException(status_code=502, detail=f"Body fetch failed: {exc}")
     return templates.TemplateResponse(
+        request,
         "message_body.html",
         {
-            "request": request,
             "subject": body.get("subject"),
             "from_addr": body.get("from"),
             "received": body.get("received"),
@@ -512,9 +551,9 @@ async def ui_senders(request: Request):
     for r in domains_rows:
         r["rule"] = rule_index.get(("domain", r["target"]))
     return templates.TemplateResponse(
+        request,
         "senders.html",
         {
-            "request": request,
             "senders": senders_rows,
             "domains": domains_rows,
             "username": request.session.get("username"),
@@ -527,9 +566,9 @@ async def ui_rules(request: Request):
     user_id = _require_user(request)
     rules = await rules_module.list_rules(user_id)
     return templates.TemplateResponse(
+        request,
         "rules.html",
         {
-            "request": request,
             "rules": rules,
             "username": request.session.get("username"),
         },
@@ -651,6 +690,143 @@ async def ui_next_page(task_id: str, request: Request):
     return RedirectResponse(f"/ui/tasks/{new_id}", status_code=303)
 
 
+async def _load_chat_history(user_id: str, limit: int) -> list[dict]:
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT role, content, created_at FROM chat_messages
+               WHERE user_id = ?
+               ORDER BY message_id DESC LIMIT ?""",
+            (user_id, limit),
+        )
+        rows = await cur.fetchall()
+    # rows are newest-first; flip to oldest-first for display + LLM context.
+    return [dict(r) for r in reversed(rows)]
+
+
+async def _persist_chat_message(user_id: str, role: str, content: str) -> None:
+    async with aiosqlite.connect(settings.db_path) as db:
+        await db.execute(
+            """INSERT INTO chat_messages (user_id, role, content, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (user_id, role, content, datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+
+
+@app.get("/ui/chat", response_class=HTMLResponse)
+async def ui_chat(request: Request):
+    user_id = _require_user(request)
+    history = await _load_chat_history(user_id, limit=50)
+    return templates.TemplateResponse(
+        request,
+        "chat.html",
+        {
+            "history": history,
+            "username": request.session.get("username"),
+        },
+    )
+
+
+@app.post("/ui/chat/send")
+async def ui_chat_send(request: Request, background_tasks: BackgroundTasks):
+    user_id = _require_user(request)
+    form = await request.form()
+    user_message = (form.get("message") or "").strip()
+    if not user_message:
+        return RedirectResponse("/ui/chat", status_code=303)
+
+    # Persist the user message immediately so it shows up if the LLM stalls.
+    await _persist_chat_message(user_id, "user", user_message)
+
+    history_for_llm = await _load_chat_history(
+        user_id, limit=settings.chat_history_window
+    )
+    # Drop the just-inserted message so chat() can append it itself.
+    history_for_llm = [
+        {"role": h["role"], "content": h["content"]}
+        for h in history_for_llm
+        if not (h["role"] == "user" and h["content"] == user_message)
+    ]
+
+    accept = request.headers.get("accept", "")
+    if "text/plain" in accept or "text/event-stream" in accept:
+        # Streaming path — JS hijacked the form submit.
+        return StreamingResponse(
+            _stream_chat_reply(user_id, user_message, history_for_llm),
+            media_type="text/plain",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Non-streaming fallback (no JS) — block until full reply, then redirect.
+    try:
+        reply = await chat_module.chat_with_tools(
+            user_id, history_for_llm, user_message
+        )
+    except chat_module.OllamaChatError as exc:
+        logger.warning("chat: %s", exc)
+        reply = f"⚠ {exc}"
+    except Exception as exc:
+        logger.exception("chat failed")
+        reply = f"Sorry — I hit an unexpected error: {exc}"
+
+    await _persist_chat_message(user_id, "assistant", reply)
+    background_tasks.add_task(chat_module.remember, user_id, user_message, reply)
+    return RedirectResponse("/ui/chat", status_code=303)
+
+
+async def _stream_chat_reply(
+    user_id: str, user_message: str, history_for_llm: list[dict]
+):
+    """Async generator that proxies tool-call progress + the final reply to
+    the client and persists + schedules memory update once the stream
+    completes (or fails)."""
+    collected: list[str] = []
+    try:
+        async for fragment in chat_module.chat_with_tools_stream(
+            user_id, history_for_llm, user_message
+        ):
+            collected.append(fragment)
+            yield fragment
+    except chat_module.OllamaChatError as exc:
+        logger.warning("chat stream: %s", exc)
+        msg = f"\n\n⚠ {exc}"
+        collected.append(msg)
+        yield msg
+    except Exception as exc:
+        logger.exception("chat streaming failed")
+        msg = f"\n\n⚠ Unexpected error: {exc}"
+        collected.append(msg)
+        yield msg
+    finally:
+        full_reply = "".join(collected).strip()
+        if full_reply:
+            try:
+                await _persist_chat_message(user_id, "assistant", full_reply)
+            except Exception:
+                logger.exception("failed to persist streamed reply")
+            try:
+                # Fire-and-forget — BackgroundTasks attached to a streaming
+                # response don't reliably run, so we kick off the memory
+                # update via a bare task instead.
+                asyncio.create_task(
+                    chat_module.remember(user_id, user_message, full_reply)
+                )
+            except Exception:
+                logger.exception("failed to schedule memory update")
+
+
+@app.post("/ui/chat/clear")
+async def ui_chat_clear(request: Request):
+    user_id = _require_user(request)
+    async with aiosqlite.connect(settings.db_path) as db:
+        await db.execute(
+            "DELETE FROM chat_messages WHERE user_id = ?", (user_id,)
+        )
+        await db.commit()
+    return RedirectResponse("/ui/chat", status_code=303)
+
+
 @app.get("/ui/settings", response_class=HTMLResponse)
 async def ui_settings(request: Request):
     user_id = _require_user(request)
@@ -673,9 +849,9 @@ async def ui_settings(request: Request):
         except ValueError:
             provider_label = row["provider"]
     return templates.TemplateResponse(
+        request,
         "settings.html",
         {
-            "request": request,
             "username": request.session.get("username"),
             "schedule_interval_minutes": row["schedule_interval_minutes"] if row else None,
             "default_schedule_interval_minutes": settings.default_schedule_interval_minutes,

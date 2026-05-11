@@ -66,7 +66,7 @@ async def auto_delete(
         if not from_addr:
             return m
         domain_blocked = is_blocked(from_addr, BLOCKED_DOMAINS)
-        rule_denied = lookup_rule(rules, from_addr) == "deny"
+        rule_denied = lookup_rule(rules, from_addr, m.get("subject")) == "deny"
         if not (domain_blocked or rule_denied):
             return m
         async with semaphore:
@@ -113,7 +113,7 @@ async def classify_messages(
         async def _one(message: dict) -> dict:
             if message.get("auto_deleted"):
                 return message
-            ruled = lookup_rule(rules, message.get("from"))
+            ruled = lookup_rule(rules, message.get("from"), message.get("subject"))
             if ruled == "allow":
                 return {
                     **message,

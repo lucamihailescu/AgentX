@@ -158,9 +158,7 @@
     </p>
 
     {% if task.result.messages %}
-      {% set actionable = task.result.messages | selectattr('spam', 'equalto', true) | rejectattr('deleted') | rejectattr('auto_deleted') | list %}
-
-      {% if actionable %}
+      {% if has_actionable %}
         <div id="bulk-bar" class="bulk-bar" hidden>
           <span class="bulk-count"><strong id="bulk-count">0</strong> selected</span>
           <div class="bulk-actions">
@@ -194,8 +192,8 @@
           <thead>
             <tr>
               <th class="check-cell">
-                {% if actionable %}
-                  <input type="checkbox" id="check-all" title="Select all spam" />
+                {% if has_actionable %}
+                  <input type="checkbox" id="check-all" title="Select all actionable" />
                 {% endif %}
               </th>
               <th style="width: 110px">verdict</th>
@@ -219,7 +217,7 @@
                   data-status="{{ row_status }}"
                   data-search="{{ ((m.from or '') ~ ' ' ~ (m.subject or '')) | lower | e }}">
                 <td class="check-cell">
-                  {% if m.spam == true and not m.deleted and not m.auto_deleted and m.id %}
+                  {% if (m.spam == true or m.spam is none) and not m.deleted and not m.auto_deleted and m.id %}
                     <input type="checkbox" class="row-check" name="messages" value="{{ m.id }}" />
                   {% endif %}
                 </td>
@@ -254,7 +252,7 @@
                 </td>
                 <td class="meta received">{{ m.received or '' }}</td>
                 <td class="row-rules">
-                  {% if m.spam == true and not m.deleted and not m.auto_deleted and m.id and m.from %}
+                  {% if (m.spam == true or m.spam is none) and not m.deleted and not m.auto_deleted and m.id and m.from %}
                     <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/rule/allow"
                           method="post" class="inline"
                           data-confirm="Always allow {{ m.from }}?"

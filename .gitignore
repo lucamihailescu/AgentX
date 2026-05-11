@@ -24,6 +24,10 @@ ENV/
 
 # Local SQLite databases (compose now bind-mounts ./data/ for persistence)
 data/
+qdrant_data/
+aliases/
+collections/
+raft_state.json
 *.db
 *.sqlite
 *.sqlite3
