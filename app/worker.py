@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import aiosqlite
 
 from .config import settings
+from . import digest as digest_module
 from . import feedback
 from .providers import get_provider
 from .providers.base import AuthError
@@ -66,13 +67,21 @@ class Worker:
 
     async def _process(self, task: dict) -> None:
         task_id = task["task_id"]
+        kind = task.get("kind")
+        if kind == "digest":
+            try:
+                await self._process_digest(task)
+            except Exception as exc:
+                logger.exception("Digest task %s failed", task_id)
+                await self._update(task_id, status="failed", error=str(exc))
+            return
         try:
             provider = get_provider(task.get("provider"))
         except ValueError as exc:
             await self._update(task_id, status="failed", error=f"Provider: {exc}")
             return
         try:
-            if task.get("kind") == "purge":
+            if kind == "purge":
                 await self._process_purge(task, provider)
             else:
                 await self._process_audit(task, provider)
@@ -81,6 +90,27 @@ class Worker:
         except Exception as exc:
             logger.exception("Task %s failed", task_id)
             await self._update(task_id, status="failed", error=str(exc))
+
+    async def _process_digest(self, task: dict) -> None:
+        task_id = task["task_id"]
+        user_id = task["user_id"]
+        async with aiosqlite.connect(settings.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT digest_interval_days FROM users WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cur.fetchone()
+        user_days = row["digest_interval_days"] if row else None
+        window_days = (
+            user_days
+            or settings.default_digest_interval_days
+            or 7
+        )
+        result = await digest_module.generate_digest(user_id, window_days)
+        await self._update(
+            task_id, status="completed", result_data=json.dumps(result)
+        )
 
     async def _process_audit(self, task: dict, provider) -> None:
         task_id = task["task_id"]
@@ -175,15 +205,21 @@ class Scheduler:
                 pass
 
     async def _tick(self) -> None:
+        await self._tick_audits()
+        await self._tick_digests()
+
+    async def _tick_audits(self) -> None:
         default_minutes = settings.default_schedule_interval_minutes
         async with aiosqlite.connect(settings.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """SELECT u.user_id, u.schedule_interval_minutes,
                           (SELECT MAX(created_at) FROM tasks t
-                              WHERE t.user_id = u.user_id) AS last_at,
+                              WHERE t.user_id = u.user_id
+                                AND t.kind IN ('audit', 'purge')) AS last_at,
                           EXISTS(SELECT 1 FROM tasks t2
                                  WHERE t2.user_id = u.user_id
+                                   AND t2.kind IN ('audit', 'purge')
                                    AND t2.status IN ('queued', 'processing')) AS in_flight
                    FROM users u"""
             )
@@ -210,6 +246,44 @@ class Scheduler:
                 "user" if user_minutes else "default",
             )
 
+    async def _tick_digests(self) -> None:
+        default_days = settings.default_digest_interval_days
+        async with aiosqlite.connect(settings.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT u.user_id, u.digest_interval_days,
+                          (SELECT MAX(created_at) FROM tasks t
+                              WHERE t.user_id = u.user_id
+                                AND t.kind = 'digest') AS last_at,
+                          EXISTS(SELECT 1 FROM tasks t2
+                                 WHERE t2.user_id = u.user_id
+                                   AND t2.kind = 'digest'
+                                   AND t2.status IN ('queued', 'processing')) AS in_flight
+                   FROM users u"""
+            )
+            users = await cur.fetchall()
+
+        now = datetime.now(timezone.utc)
+        for u in users:
+            user_days = u["digest_interval_days"]
+            interval_days = user_days if user_days else default_days
+            if not interval_days or interval_days <= 0:
+                continue
+            if u["in_flight"]:
+                continue
+            interval = timedelta(days=interval_days)
+            if u["last_at"]:
+                last = datetime.fromisoformat(u["last_at"].replace("Z", "+00:00"))
+                if now - last < interval:
+                    continue
+            await self._insert_digest_task(u["user_id"])
+            logger.info(
+                "scheduler queued digest for %s (interval=%sd, source=%s)",
+                u["user_id"],
+                interval_days,
+                "user" if user_days else "default",
+            )
+
     @staticmethod
     async def _insert_task(user_id: str) -> None:
         task_id = str(uuid.uuid4())
@@ -219,6 +293,19 @@ class Scheduler:
                 """INSERT INTO tasks
                    (task_id, user_id, status, created_at, updated_at)
                    VALUES (?, ?, 'queued', ?, ?)""",
+                (task_id, user_id, now, now),
+            )
+            await db.commit()
+
+    @staticmethod
+    async def _insert_digest_task(user_id: str) -> None:
+        task_id = str(uuid.uuid4())
+        now = _now()
+        async with aiosqlite.connect(settings.db_path) as db:
+            await db.execute(
+                """INSERT INTO tasks
+                   (task_id, user_id, kind, status, created_at, updated_at)
+                   VALUES (?, ?, 'digest', 'queued', ?, ?)""",
                 (task_id, user_id, now, now),
             )
             await db.commit()

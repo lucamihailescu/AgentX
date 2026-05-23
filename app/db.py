@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(user_id),
-    kind TEXT NOT NULL DEFAULT 'audit',     -- 'audit' or 'purge'
+    kind TEXT NOT NULL DEFAULT 'audit',     -- 'audit', 'purge', or 'digest'
     status TEXT NOT NULL,
     cursor_before TEXT,
     error TEXT,
@@ -84,6 +84,7 @@ _FORWARD_COMPAT_ALTERS = (
     "ALTER TABLE users ADD COLUMN schedule_interval_hours INTEGER",   # legacy
     "ALTER TABLE users ADD COLUMN schedule_interval_minutes INTEGER",
     "ALTER TABLE users ADD COLUMN provider TEXT NOT NULL DEFAULT 'microsoft'",
+    "ALTER TABLE users ADD COLUMN digest_interval_days INTEGER",
 )
 
 

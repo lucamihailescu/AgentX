@@ -24,11 +24,18 @@
 
     <form method="post" action="/ui/settings" class="settings-form">
       <label>
-        <span>Run every</span>
+        <span>Run an audit every</span>
         <input type="number" name="schedule_interval_minutes" min="0"
                value="{{ schedule_interval_minutes or '' }}"
                placeholder="(disabled)" />
         <span class="unit">minutes</span>
+      </label>
+      <label>
+        <span>Generate a digest every</span>
+        <input type="number" name="digest_interval_days" min="0"
+               value="{{ digest_interval_days or '' }}"
+               placeholder="{{ default_digest_interval_days or '(disabled)' }}" />
+        <span class="unit">days</span>
       </label>
       <button type="submit" class="primary">save</button>
     </form>
@@ -36,6 +43,9 @@
     <p class="meta" style="margin-top: 1.25rem; font-size: .8rem">
       <span class="eyebrow inline">last audit</span>&nbsp;
       <code>{{ last_audit_at or '— none yet —' }}</code>
+      &nbsp;·&nbsp;
+      <span class="eyebrow inline">last digest</span>&nbsp;
+      <code>{{ last_digest_at or '— none yet —' }}</code>
       {% if provider_label %}
         &nbsp;·&nbsp;
         <span class="eyebrow inline">provider</span>&nbsp;<code>{{ provider_label }}</code>

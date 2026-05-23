@@ -1,4 +1,4 @@
-"""Chat interface for agentx — Ollama LLM + mem0 (Qdrant + Ollama embeddings).
+"""Chat interface for agentx — Ollama LLM + mem0 (ChromaDB + Ollama embeddings).
 
 Design:
 - mem0 is loaded lazily on first use; failure is logged and degrades to a
@@ -57,12 +57,10 @@ def _build_mem0_config() -> dict:
             },
         },
         "vector_store": {
-            "provider": "qdrant",
+            "provider": "chroma",
             "config": {
                 "collection_name": "agentx_memories",
-                "host": settings.qdrant_host,
-                "port": settings.qdrant_port,
-                "embedding_model_dims": settings.embed_dims,
+                "path": settings.chroma_path,
             },
         },
     }
@@ -81,12 +79,11 @@ async def _get_memory():
         if _memory_unavailable:
             return None
         try:
-            # mem0's Memory.from_config is sync and can do network I/O
-            # (creating the Qdrant collection); push to a thread.
+            # mem0's Memory.from_config is sync and can touch disk (creating
+            # the ChromaDB collection on first run); push to a thread.
             from mem0 import Memory  # noqa: PLC0415 — defer import cost
             _memory = await asyncio.to_thread(Memory.from_config, _build_mem0_config())
-            logger.info("mem0 initialized (qdrant=%s:%d)",
-                        settings.qdrant_host, settings.qdrant_port)
+            logger.info("mem0 initialized (chroma path=%s)", settings.chroma_path)
         except Exception as exc:
             logger.warning(
                 "mem0 init failed (%s); chat will run without persistent memory",

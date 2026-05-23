@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% block title %}agentx — digest {{ task.task_id[:8] }}{% endblock %}
+{% block head %}
+  {% if task.status in ("queued", "processing") %}
+    <meta http-equiv="refresh" content="2">
+  {% endif %}
+{% endblock %}
+{% block body %}
+  <div class="page-head">
+    <div>
+      <div class="eyebrow"><a class="plain" href="/ui/digests">← all digests</a></div>
+      <h1>Digest <span class="taskid">{{ task.task_id[:8] }}</span>.</h1>
+    </div>
+    <div class="actions">
+      <span class="pill {{ task.status }}">{{ task.status }}</span>
+    </div>
+  </div>
+
+  <p class="meta timeline">
+    <span class="eyebrow inline">created</span>&nbsp;{{ task.created_at }}
+    {% if task.result %}
+      &nbsp;·&nbsp;
+      <span class="eyebrow inline">window</span>&nbsp;<code>{{ task.result.window_days }} days</code>
+    {% endif %}
+    {% if task.status in ("queued", "processing") %}
+      &nbsp;·&nbsp; <span class="ar">auto-refreshing every 2s</span>
+    {% endif %}
+  </p>
+
+  {% if task.error %}
+    <div class="panel error">
+      <div class="eyebrow" style="color: var(--spam)">error</div>
+      <pre class="errmsg">{{ task.error }}</pre>
+    </div>
+  {% endif %}
+
+  {% if not task.result %}
+    <div class="panel">
+      <div class="empty">Aggregating recent activity…</div>
+    </div>
+  {% else %}
+    {% set c = task.result.counts %}
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Audits</div>
+        <div class="stat-value">{{ c.audits_completed }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Messages scanned</div>
+        <div class="stat-value">{{ c.messages_scanned }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Flagged spam</div>
+        <div class="stat-value spam">{{ c.spam_flagged }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Auto-deleted</div>
+        <div class="stat-value accent">{{ c.auto_deleted + c.purge_deleted }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">You deleted</div>
+        <div class="stat-value muted">{{ c.user_deleted }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">You unsubscribed</div>
+        <div class="stat-value muted">{{ c.user_unsubscribed }}</div>
+      </div>
+    </div>
+
+    {% if task.result.top_spam_senders %}
+      <h2 style="margin-top: 2rem">Top spam senders</h2>
+      <div class="panel flush">
+        <table>
+          <thead>
+            <tr>
+              <th>sender</th>
+              <th style="width: 110px">spam hits</th>
+              <th style="width: 100px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in task.result.top_spam_senders %}
+              <tr>
+                <td><code class="from">{{ s.from }}</code></td>
+                <td class="meta mono">{{ s.spam }}</td>
+                <td class="row-rules">
+                  <form action="/ui/suggestions/block" method="post" class="inline"
+                        data-confirm="Always block {{ s.from }} from now on?"
+                        data-confirm-action="Always block">
+                    <input type="hidden" name="target" value="{{ s.from }}">
+                    <input type="hidden" name="target_type" value="address">
+                    <button type="submit" class="small danger">block</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    {% if task.result.needs_eye %}
+      <h2 style="margin-top: 2rem">Needs your eye <span class="meta" style="font-family: var(--mono); font-size: .72rem; letter-spacing: .04em">— {{ task.result.needs_eye | length }} borderline message{% if task.result.needs_eye | length != 1 %}s{% endif %}</span></h2>
+      <p class="meta" style="max-width: 64ch">
+        Messages the model wasn't fully sure about (low confidence) or couldn't
+        classify. Click through to act on them in the source audit.
+      </p>
+      <div class="panel flush">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 90px">verdict</th>
+              <th style="width: 220px">from</th>
+              <th>subject</th>
+              <th style="width: 130px">received</th>
+              <th style="width: 80px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in task.result.needs_eye %}
+              <tr>
+                <td>
+                  {% if m.spam is none %}
+                    <span class="pill unknown">?</span>
+                  {% else %}
+                    <span class="pill spam">spam</span>
+                  {% endif %}
+                  {% if m.confidence is not none %}
+                    <div class="conf">{{ '%.0f'|format(m.confidence * 100) }}%</div>
+                  {% endif %}
+                </td>
+                <td><code class="from">{{ m.from or '—' }}</code></td>
+                <td>
+                  <div class="subject-line">{{ m.subject or '(no subject)' }}</div>
+                  {% if m.reason %}<div class="reason">{{ m.reason }}</div>{% endif %}
+                </td>
+                <td class="meta received">{{ m.received or '' }}</td>
+                <td class="row-rules">
+                  <a class="small button"
+                     href="/ui/tasks/{{ m.audit_task_id }}#row-{{ m.message_id }}"
+                     title="Open in source audit">act ↗</a>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    {% if task.result.new_rules %}
+      <h2 style="margin-top: 2rem">New rules <span class="meta" style="font-family: var(--mono); font-size: .72rem; letter-spacing: .04em">— {{ task.result.new_rules | length }} added in window</span></h2>
+      <div class="panel flush">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 90px">verdict</th>
+              <th style="width: 110px">type</th>
+              <th>target</th>
+              <th style="width: 200px">added</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in task.result.new_rules %}
+              <tr>
+                <td>
+                  {% if r.verdict == 'allow' %}
+                    <span class="pill ham">allow</span>
+                  {% else %}
+                    <span class="pill spam">deny</span>
+                  {% endif %}
+                </td>
+                <td class="meta mono" style="font-size: .76rem">{{ r.target_type }}</td>
+                <td><code class="from">{{ r.target }}</code></td>
+                <td class="meta mono" style="font-size: .76rem">{{ r.created_at }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    {% if not task.result.top_spam_senders
+          and not task.result.needs_eye
+          and not task.result.new_rules
+          and c.messages_scanned == 0 %}
+      <div class="panel">
+        <div class="empty">
+          Nothing to report — no completed audits in the last
+          {{ task.result.window_days }} days.
+        </div>
+      </div>
+    {% endif %}
+
+    <details class="raw" style="margin-top: 2.5rem">
+      <summary>raw json</summary>
+      <pre class="box">{{ raw_json }}</pre>
+    </details>
+  {% endif %}
+
+  <style>
+    .taskid {
+      font-family: var(--mono);
+      font-size: .55em;
+      letter-spacing: 0;
+      color: var(--text-muted);
+      vertical-align: middle;
+      margin-left: .35rem;
+      padding: .25rem .5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .timeline { font-size: .8rem; margin-bottom: .5rem; }
+    .timeline .eyebrow.inline {
+      display: inline;
+      margin: 0;
+      color: var(--text-faint);
+    }
+    .timeline .ar { color: var(--accent); }
+    .panel.error {
+      border-color: var(--spam);
+      background: var(--spam-tint);
+      margin: 1.5rem 0;
+    }
+    .errmsg {
+      margin: 0;
+      white-space: pre-wrap;
+      font-family: var(--mono);
+      font-size: .82rem;
+      color: var(--text);
+    }
+    .conf {
+      font-family: var(--mono);
+      font-size: .68rem;
+      color: var(--text-faint);
+      margin-top: .35rem;
+      letter-spacing: 0.04em;
+    }
+    .from {
+      font-size: .78rem;
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+    .subject-line {
+      font-weight: 500;
+      line-height: 1.4;
+    }
+    .reason {
+      font-family: var(--serif);
+      font-style: italic;
+      font-size: .82rem;
+      color: var(--text-muted);
+      margin-top: .3rem;
+      font-variation-settings: "opsz" 60;
+    }
+    .received {
+      font-family: var(--mono);
+      font-size: .73rem;
+      white-space: nowrap;
+      color: var(--text-faint);
+    }
+    .row-rules {
+      white-space: nowrap;
+      text-align: right;
+    }
+    a.small.button {
+      display: inline-block;
+      font-size: .68rem;
+      padding: .26rem .55rem;
+      line-height: 1;
+      border-radius: 3px;
+      letter-spacing: 0;
+    }
+  </style>
+{% endblock %}

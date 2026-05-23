@@ -45,7 +45,7 @@ So this codebase drops the sidecar and goes straight to MSAL. The "long-running"
 | `app/worker.py` | Two background loops: `Worker` claims queued rows and runs the pipeline; `Scheduler` queues new audits per user on a configurable interval |
 | `app/templates/` | Jinja2 templates: `base.html`, `login.html`, `index.html`, `task.html`, `rules.html`, `senders.html`, `settings.html` |
 | `app/sender_stats.py` | Per-user / per-domain aggregate counters (precomputed by the worker; bumped on user actions) — backs `/ui/senders` with a single indexed SELECT instead of scanning every audit's JSON. |
-| `app/chat.py` | mem0-backed chat assistant. Ollama for chat LLM + embeddings (`nomic-embed-text`); Qdrant sidecar for vectors. Loads inbox-state context + retrieved memories per turn; updates memory in the background. Degrades gracefully to stateless chatbot if mem0/Qdrant init fails. |
+| `app/chat.py` | mem0-backed chat assistant. Ollama for chat LLM + embeddings (`nomic-embed-text`); ChromaDB in-process for vectors (persisted under `./data/chroma`). Loads inbox-state context + retrieved memories per turn; updates memory in the background. Degrades gracefully to stateless chatbot if mem0/Chroma init fails. |
 | `app/db.py` | SQLite schema (`users`, `tasks`, `sender_rules`, `sender_stats`); idempotent ALTERs for forward-compat |
 | `app/config.py` | Pydantic settings loaded from `AGENT_*` env vars |
 
@@ -288,7 +288,7 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_CHAT_MODEL` | *(falls back to `AGENT_OLLAMA_MODEL`)* | Ollama model used for the chat assistant. Leave unset to share the same model as the spam classifier. Override only when you want a different (typically larger) model for chat. Should support a reasonable context window (4k+) since chat messages prepend mailbox-state context + memories. |
 | `AGENT_EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model used by mem0 to vectorize memories. Pull with `ollama pull nomic-embed-text` before first chat. |
 | `AGENT_EMBED_DIMS` | `768` | Embedding dimension. Must match the embed model — `nomic-embed-text` = 768. |
-| `AGENT_QDRANT_HOST` / `AGENT_QDRANT_PORT` | `qdrant` / `6333` | Where mem0 finds Qdrant. The compose service is named `qdrant` and stays on the internal network. |
+| `AGENT_CHROMA_PATH` | `/data/chroma` | Directory inside the container where ChromaDB persists its vector store. Lives under the same bind-mount as `tasks.db`, so memories survive `docker compose down`. |
 | `AGENT_MAX_MESSAGES_PER_AUDIT` | `200` | Cap on messages fetched per audit. Agent walks `@odata.nextLink` 50 messages at a time up to this number. Use **Next page** on a finished audit to keep walking older mail. |
 | `AGENT_BLOCKED_DOMAINS` | *(empty)* | Comma-separated sender domains whose mail is auto-deleted at fetch time. Subdomain matching enabled. |
 | `AGENT_SUGGEST_BLOCK_THRESHOLD` | `3` | Min combined manual `deleted + unsubscribed` actions against a sender before the home page suggests a deny rule. |
@@ -337,7 +337,7 @@ This pairs naturally with rules + the domain blocklist: once you've trained the 
 **Architecture**
 - **LLM:** Ollama (`AGENT_CHAT_MODEL`, falls back to `AGENT_OLLAMA_MODEL`).
 - **Embeddings:** Ollama (`AGENT_EMBED_MODEL`, default `nomic-embed-text` — must be pulled separately).
-- **Vector store:** Qdrant (compose sidecar; container only on the internal network).
+- **Vector store:** ChromaDB, in-process and file-backed at `AGENT_CHROMA_PATH` (default `/data/chroma`, persisted via the same bind mount as `tasks.db`). No separate container or network hop.
 - **Memory layer:** [mem0](https://github.com/mem0ai/mem0). Each chat turn:
   1. Loads inbox-state context — most recent **5 audit IDs** (in `[audit:<uuid>]` form, so the model can cite them inline), rule counts, top spammy senders — from SQLite.
   2. Calls `memory.search(user_message)` for the top-K relevant memories about the user.
@@ -379,10 +379,10 @@ ollama pull llama3.2          # if not already
 ollama pull nomic-embed-text  # required for embeddings
 ```
 
-The first chat message after a cold start may take ~10s while mem0 initializes the Qdrant collection. Subsequent turns are bounded by Ollama latency.
+The first chat message after a cold start may take a couple of seconds while mem0 initializes the ChromaDB collection on disk. Subsequent turns are bounded by Ollama latency.
 
 **Failure modes**
-- If Qdrant isn't reachable, chat still works — it just runs as a stateless chatbot (no persistent preferences across sessions). The agent log will say `mem0 init failed (...); chat will run without persistent memory`.
+- If ChromaDB can't open its store (bad path, disk full, version mismatch), chat still works — it just runs as a stateless chatbot (no persistent preferences across sessions). The agent log will say `mem0 init failed (...); chat will run without persistent memory`.
 - If Ollama is down or the embed model isn't pulled, the first chat attempt fails with a 502; subsequent attempts retry.
 - If Ollama's `/api/chat` returns slowly (large context), the user message is persisted *first* so it doesn't disappear on a UI reload.
 

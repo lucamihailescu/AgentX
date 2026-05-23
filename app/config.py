@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = 2.0
     default_schedule_interval_minutes: int | None = None
     scheduler_tick_seconds: float = 60.0
+    # Digest cadence in days. Per-user override on `users.digest_interval_days`
+    # wins. 0 / None disables.
+    default_digest_interval_days: int | None = 7
 
     max_messages_per_audit: int = 200
 
@@ -33,15 +36,16 @@ class Settings(BaseSettings):
     ollama_num_predict: int = 200
     ollama_examples_per_class: int = 3
 
-    # Chat (mem0 + Ollama embeddings + Qdrant) ─────────────────────────────
+    # Chat (mem0 + Ollama embeddings + ChromaDB) ──────────────────────────
     # Falls back to `ollama_model` when unset/empty so a single OLLAMA_MODEL
     # env var configures both the classifier and the chat. Override only to
     # use a different (typically larger) model for chat.
     chat_model: str | None = None
     embed_model: str = "nomic-embed-text"
     embed_dims: int = 768
-    qdrant_host: str = "qdrant"
-    qdrant_port: int = 6333
+    # Directory where ChromaDB persists its in-process collections. Sits
+    # inside the same /data bind mount as the SQLite db.
+    chroma_path: str = "/data/chroma"
     chat_history_window: int = 12         # turns of recent history sent to LLM
     chat_memory_top_k: int = 5            # mem0 results injected into prompt
 

@@ -176,7 +176,7 @@ async def index(request: Request):
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """SELECT task_id, kind, status, cursor_before, created_at, updated_at
-               FROM tasks WHERE user_id = ?
+               FROM tasks WHERE user_id = ? AND kind != 'digest'
                ORDER BY created_at DESC LIMIT 10""",
             (user_id,),
         )
@@ -277,6 +277,58 @@ async def ui_create_purge(request: Request):
     user_id = _require_user(request)
     task_id = await _insert_task(user_id, kind="purge")
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+
+
+# ── digests ──────────────────────────────────────────────────────────────
+@app.get("/ui/digests", response_class=HTMLResponse)
+async def ui_digests(request: Request):
+    user_id = _require_user(request)
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT task_id, status, result_data, created_at, updated_at
+               FROM tasks WHERE user_id = ? AND kind = 'digest'
+               ORDER BY created_at DESC LIMIT 20""",
+            (user_id,),
+        )
+        rows = []
+        for r in await cur.fetchall():
+            d = dict(r)
+            d["result"] = json.loads(d.pop("result_data")) if d.get("result_data") else None
+            rows.append(d)
+    return templates.TemplateResponse(
+        request,
+        "digests.html",
+        {
+            "digests": rows,
+            "username": request.session.get("username"),
+        },
+    )
+
+
+@app.post("/ui/digests")
+async def ui_create_digest(request: Request):
+    user_id = _require_user(request)
+    task_id = await _insert_task(user_id, kind="digest")
+    return RedirectResponse(f"/ui/digests/{task_id}", status_code=303)
+
+
+@app.get("/ui/digests/{task_id}", response_class=HTMLResponse)
+async def ui_digest_detail(task_id: str, request: Request):
+    user_id = _require_user(request)
+    task = await _load_task(user_id, task_id)
+    if task.get("kind") != "digest":
+        raise HTTPException(status_code=404, detail="Not a digest")
+    raw_json = json.dumps(task["result"], indent=2) if task["result"] else None
+    return templates.TemplateResponse(
+        request,
+        "digest.html",
+        {
+            "task": task,
+            "raw_json": raw_json,
+            "username": request.session.get("username"),
+        },
+    )
 
 
 @app.get("/ui/tasks/{task_id}", response_class=HTMLResponse)
@@ -857,15 +909,23 @@ async def ui_settings(request: Request):
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT schedule_interval_minutes, provider FROM users WHERE user_id = ?",
+            """SELECT schedule_interval_minutes, digest_interval_days, provider
+               FROM users WHERE user_id = ?""",
             (user_id,),
         )
         row = await cur.fetchone()
         cur = await db.execute(
-            """SELECT MAX(created_at) AS last_at FROM tasks WHERE user_id = ?""",
+            """SELECT MAX(created_at) AS last_at FROM tasks
+               WHERE user_id = ? AND kind IN ('audit', 'purge')""",
             (user_id,),
         )
         last_row = await cur.fetchone()
+        cur = await db.execute(
+            """SELECT MAX(created_at) AS last_at FROM tasks
+               WHERE user_id = ? AND kind = 'digest'""",
+            (user_id,),
+        )
+        last_digest_row = await cur.fetchone()
     provider_label = None
     if row and row["provider"]:
         try:
@@ -879,7 +939,10 @@ async def ui_settings(request: Request):
             "username": request.session.get("username"),
             "schedule_interval_minutes": row["schedule_interval_minutes"] if row else None,
             "default_schedule_interval_minutes": settings.default_schedule_interval_minutes,
+            "digest_interval_days": row["digest_interval_days"] if row else None,
+            "default_digest_interval_days": settings.default_digest_interval_days,
             "last_audit_at": last_row["last_at"] if last_row else None,
+            "last_digest_at": last_digest_row["last_at"] if last_digest_row else None,
             "provider_label": provider_label,
         },
     )
@@ -889,21 +952,30 @@ async def ui_settings(request: Request):
 async def ui_settings_save(request: Request):
     user_id = _require_user(request)
     form = await request.form()
-    raw = (form.get("schedule_interval_minutes") or "").strip()
-    interval: int | None
-    if not raw:
-        interval = None
-    else:
+
+    def _parse_positive_int(value: str | None, field: str) -> int | None:
+        raw = (value or "").strip()
+        if not raw:
+            return None
         try:
-            interval = int(raw)
+            n = int(raw)
         except ValueError:
-            raise HTTPException(status_code=400, detail="interval must be an integer")
-        if interval <= 0:
-            interval = None
+            raise HTTPException(status_code=400, detail=f"{field} must be an integer")
+        return n if n > 0 else None
+
+    interval = _parse_positive_int(
+        form.get("schedule_interval_minutes"), "schedule_interval_minutes"
+    )
+    digest_days = _parse_positive_int(
+        form.get("digest_interval_days"), "digest_interval_days"
+    )
     async with aiosqlite.connect(settings.db_path) as db:
         await db.execute(
-            "UPDATE users SET schedule_interval_minutes = ?, updated_at = ? WHERE user_id = ?",
-            (interval, datetime.now(timezone.utc).isoformat(), user_id),
+            """UPDATE users
+               SET schedule_interval_minutes = ?, digest_interval_days = ?,
+                   updated_at = ?
+               WHERE user_id = ?""",
+            (interval, digest_days, datetime.now(timezone.utc).isoformat(), user_id),
         )
         await db.commit()
     return RedirectResponse("/ui/settings", status_code=303)

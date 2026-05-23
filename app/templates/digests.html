@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}agentx — digests{% endblock %}
+{% block body %}
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">digests · last {{ digests|length }} record{% if digests|length != 1 %}s{% endif %}</div>
+      <h1>Weekly <em>digests</em>.</h1>
+    </div>
+    <div class="actions">
+      <form action="/ui/digests" method="post" class="inline">
+        <button type="submit" class="primary">+ Generate digest now</button>
+      </form>
+    </div>
+  </div>
+
+  <p class="meta" style="max-width: 64ch; margin-bottom: 1.25rem">
+    Periodic snapshot of what the agent did and a "needs your eye" list of
+    borderline messages worth a glance. Cadence is configurable on
+    <a href="/ui/settings">settings</a>.
+  </p>
+
+  {% if digests %}
+    <div class="panel flush">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 140px">id</th>
+            <th style="width: 140px">status</th>
+            <th style="width: 110px">window</th>
+            <th style="width: 110px">scanned</th>
+            <th style="width: 110px">flagged</th>
+            <th style="width: 110px">needs eye</th>
+            <th>created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for d in digests %}
+            <tr class="clickable-row" data-href="/ui/digests/{{ d.task_id }}">
+              <td><code>{{ d.task_id[:8] }}</code></td>
+              <td><span class="pill {{ d.status }}">{{ d.status }}</span></td>
+              <td class="meta mono" style="font-size: .76rem">
+                {% if d.result %}{{ d.result.window_days }}d{% else %}—{% endif %}
+              </td>
+              <td class="meta mono">
+                {% if d.result %}{{ d.result.counts.messages_scanned }}{% else %}—{% endif %}
+              </td>
+              <td class="meta mono">
+                {% if d.result %}{{ d.result.counts.spam_flagged }}{% else %}—{% endif %}
+              </td>
+              <td class="meta mono">
+                {% if d.result %}{{ d.result.needs_eye | length }}{% else %}—{% endif %}
+              </td>
+              <td class="meta mono" style="font-size: .78rem">{{ d.created_at }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="panel">
+      <div class="empty">No digests yet — generate one, or wait for the scheduled cadence to kick in.</div>
+    </div>
+  {% endif %}
+
+  <script>
+    document.querySelectorAll('tr.clickable-row').forEach(row => {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('a, button, form')) return;
+        const href = row.dataset.href;
+        if (href) window.location.assign(href);
+      });
+    });
+  </script>
+{% endblock %}

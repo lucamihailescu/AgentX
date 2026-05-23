@@ -31,8 +31,7 @@ services:
       AGENT_CHAT_MODEL: ${CHAT_MODEL:-}
       AGENT_EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       AGENT_EMBED_DIMS: ${EMBED_DIMS:-768}
-      AGENT_QDRANT_HOST: ${QDRANT_HOST:-qdrant}
-      AGENT_QDRANT_PORT: ${QDRANT_PORT:-6333}
+      AGENT_CHROMA_PATH: ${CHROMA_PATH:-/data/chroma}
       AGENT_MAX_MESSAGES_PER_AUDIT: ${MAX_MESSAGES_PER_AUDIT:-200}
       AGENT_BLOCKED_DOMAINS: ${BLOCKED_DOMAINS:-}
       AGENT_SUGGEST_BLOCK_THRESHOLD: ${SUGGEST_BLOCK_THRESHOLD:-3}
@@ -41,18 +40,6 @@ services:
       AGENT_SCHEDULER_TICK_SECONDS: ${SCHEDULER_TICK_SECONDS:-60}
     volumes:
       # Bind-mount to a host directory so `docker compose down -v`
-      # does NOT touch the SQLite file. Data lives in ./data/ on the host.
+      # does NOT touch the SQLite file or ChromaDB store. Both live in
+      # ./data/ on the host (./data/tasks.db and ./data/chroma/).
       - ./data:/data
-    depends_on:
-      - qdrant
-
-  qdrant:
-    image: qdrant/qdrant:v1.12.1
-    volumes:
-      - ./qdrant-data:/qdrant/storage
-    # Not exposed on the host — only the agent container needs it.
-    expose:
-      - "6333"
-
-volumes:
-  qdrant-data:
