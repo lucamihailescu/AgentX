@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import httpx
 
+from . import calibration
 from .config import BLOCKED_DOMAINS, settings
 from .ollama_client import classify
 from .providers import MailboxProvider
@@ -98,14 +99,21 @@ async def classify_messages(
     messages: list[dict],
     rules: dict[tuple[str, str], str] | None = None,
     examples: tuple[list[dict], list[dict]] | None = None,
+    priors: dict[str, dict] | None = None,
 ) -> list[dict]:
     """Run each non-auto-deleted message through Ollama in parallel.
 
     `examples` is `(ham, spam)` — past-audit examples that get injected as
     few-shot context for every Ollama call so the model calibrates to the
     user's actual taste.
+
+    `priors` is `{sender_address: {n_seen, n_actions}}` — accumulated
+    delete/unsub history per sender, blended into the model's verdict
+    by `calibration.apply`. Senders not in the map (or below the action
+    threshold) are unaffected.
     """
     rules = rules or {}
+    priors = priors or {}
     ham_examples, spam_examples = examples or ([], [])
     semaphore = asyncio.Semaphore(settings.ollama_concurrency)
     async with httpx.AsyncClient(base_url=settings.ollama_url) as client:
@@ -137,6 +145,10 @@ async def classify_messages(
                     ham_examples=ham_examples,
                     spam_examples=spam_examples,
                 )
+            sender = (message.get("from") or "").strip().lower()
+            prior = priors.get(sender) if sender else None
+            if prior:
+                verdict = calibration.apply(verdict, prior)
             return {**message, **verdict}
 
         return await asyncio.gather(*(_one(m) for m in messages))

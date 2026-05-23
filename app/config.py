@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     ollama_temperature: float = 0.0
     ollama_num_predict: int = 200
     ollama_examples_per_class: int = 3
+    # Blend per-sender prior (from accumulated delete/unsub actions) into
+    # the model's verdict. Disable to make Ollama's call authoritative.
+    calibration_enabled: bool = True
 
     # Chat (mem0 + Ollama embeddings + ChromaDB) ──────────────────────────
     # Falls back to `ollama_model` when unset/empty so a single OLLAMA_MODEL

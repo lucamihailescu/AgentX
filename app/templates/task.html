@@ -241,6 +241,10 @@
                   {% else %}
                     <span class="pill unknown">?</span>
                   {% endif %}
+                  {% if m.calibration_applied and not m.rule_applied and not m.auto_deleted %}
+                    <span class="cal-badge cal-{{ m.calibration_applied }}"
+                          title="adjusted using your past actions — {{ m.prior_n_actions }} delete/unsub against this sender">cal</span>
+                  {% endif %}
                   {% if m.confidence is not none and not m.deleted and not m.unsubscribed and not m.auto_deleted and not m.rule_applied %}
                     <div class="conf">{{ '%.0f'|format(m.confidence * 100) }}% conf</div>
                   {% endif %}
@@ -464,6 +468,26 @@
       color: var(--text-faint);
       margin-top: .35rem;
       letter-spacing: 0.04em;
+    }
+    .cal-badge {
+      display: inline-block;
+      margin-left: .35rem;
+      padding: .08rem .35rem;
+      font-family: var(--mono);
+      font-size: .58rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: var(--accent-tint);
+      border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+      border-radius: 3px;
+      vertical-align: middle;
+      cursor: help;
+    }
+    .cal-badge.cal-flipped {
+      color: var(--bg);
+      background: var(--accent);
+      border-color: var(--accent);
     }
 
     .from {

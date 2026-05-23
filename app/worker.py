@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import aiosqlite
 
 from .config import settings
+from . import calibration
 from . import digest as digest_module
 from . import feedback
 from .providers import get_provider
@@ -123,13 +124,21 @@ class Worker:
         examples = await feedback.collect_examples(
             user_id, settings.ollama_examples_per_class
         )
+        priors = await calibration.load_priors(user_id)
         if examples[0] or examples[1]:
             logger.info(
                 "audit %s using %d ham + %d spam few-shot examples",
                 task_id, len(examples[0]), len(examples[1]),
             )
+        if priors:
+            logger.info(
+                "audit %s using calibration priors for %d sender(s)",
+                task_id, len(priors),
+            )
         messages = await auto_delete(provider, user_id, messages, rules)
-        classified = await classify_messages(messages, rules, examples=examples)
+        classified = await classify_messages(
+            messages, rules, examples=examples, priors=priors
+        )
         report = await generate_report(classified)
         await self._update(task_id, status="completed", result_data=json.dumps(report))
         await sender_stats.record_audit_completion(user_id, report)
