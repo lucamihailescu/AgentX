@@ -13,7 +13,7 @@ import msal
 import logging
 
 from ..auth import CacheKeyError, _decrypt_blob, _encrypt_blob, _now
-from ..config import settings
+from ..config import redirect_uri_for, settings
 from ..unsubscribe import find_unsubscribe
 from .base import AuthError, MailboxProvider, Message
 
@@ -101,7 +101,7 @@ class MicrosoftProvider(MailboxProvider):
             raise AuthError("Microsoft provider not configured")
         return cls._msal_app().initiate_auth_code_flow(
             scopes=settings.scopes,
-            redirect_uri=settings.redirect_uri,
+            redirect_uri=redirect_uri_for("microsoft"),
         )
 
     @classmethod

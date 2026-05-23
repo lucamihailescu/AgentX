@@ -8,6 +8,7 @@
     </div>
     <div class="actions">
       <form action="/ui/digests" method="post" class="inline">
+        {% include "_csrf.html" %}
         <button type="submit" class="primary">+ Generate digest now</button>
       </form>
     </div>

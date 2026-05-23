@@ -23,6 +23,7 @@
     </p>
 
     <form method="post" action="/ui/settings" class="settings-form">
+      {% include "_csrf.html" %}
       <label>
         <span>Run an audit every</span>
         <input type="number" name="schedule_interval_minutes" min="0"

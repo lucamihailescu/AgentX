@@ -87,6 +87,7 @@
                   <form action="/ui/suggestions/block" method="post" class="inline"
                         data-confirm="Always block {{ s.from }} from now on?"
                         data-confirm-action="Always block">
+                    {% include "_csrf.html" %}
                     <input type="hidden" name="target" value="{{ s.from }}">
                     <input type="hidden" name="target_type" value="address">
                     <button type="submit" class="small danger">block</button>

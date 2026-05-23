@@ -10,9 +10,11 @@
       <form action="/ui/tasks/purge" method="post" class="inline"
             data-confirm="Walk the entire mailbox and apply blocklist + deny rules?"
             data-confirm-action="Run cleanup">
+        {% include "_csrf.html" %}
         <button type="submit">Run cleanup</button>
       </form>
       <form action="/ui/tasks" method="post" class="inline">
+        {% include "_csrf.html" %}
         <button type="submit" class="primary">+ Generate new audit</button>
       </form>
     </div>
@@ -32,11 +34,13 @@
             <form action="/ui/suggestions/block" method="post" class="inline"
                   data-confirm="Always block {{ s.target }} from now on?"
                   data-confirm-action="Always block">
+              {% include "_csrf.html" %}
               <input type="hidden" name="target" value="{{ s.target }}">
               <input type="hidden" name="target_type" value="address">
               <button type="submit" class="small danger">Always block</button>
             </form>
             <form action="/ui/suggestions/dismiss" method="post" class="inline">
+              {% include "_csrf.html" %}
               <input type="hidden" name="target" value="{{ s.target }}">
               <input type="hidden" name="target_type" value="address">
               <input type="hidden" name="kind" value="block">

@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     session_secret: str
     cache_key: str | None = None
     db_path: str = "tasks.db"
+    # When set (e.g. https://agent.example.com), the agent assumes it's
+    # reachable on this URL over HTTPS. OAuth redirect URIs derive from
+    # it, the session cookie gets the Secure flag, and CSRF protection
+    # is enforced on every state-changing form post. Leave None for
+    # localhost dev.
+    public_base_url: str | None = None
     worker_poll_interval_seconds: float = 2.0
     default_schedule_interval_minutes: int | None = None
     scheduler_tick_seconds: float = 60.0
@@ -77,3 +83,20 @@ settings = Settings()
 BLOCKED_DOMAINS: frozenset[str] = frozenset(
     d.strip().lower() for d in settings.blocked_domains.split(",") if d.strip()
 )
+
+
+def redirect_uri_for(provider_name: str) -> str:
+    """Return the OAuth callback URL for a provider.
+
+    When `public_base_url` is configured (cloudflared / public hostname),
+    derive from it so callbacks land on the external HTTPS URL. Otherwise
+    fall back to the per-provider env setting (localhost by default).
+    """
+    if settings.public_base_url:
+        base = settings.public_base_url.rstrip("/")
+        return f"{base}/auth/{provider_name}/callback"
+    if provider_name == "microsoft":
+        return settings.redirect_uri
+    if provider_name == "google":
+        return settings.google_redirect_uri
+    raise ValueError(f"Unknown provider: {provider_name}")

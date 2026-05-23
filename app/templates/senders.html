@@ -51,6 +51,7 @@
                     <span class="pill spam">denied</span>
                   {% else %}
                     <form method="post" action="/ui/rules/add" class="inline">
+                      {% include "_csrf.html" %}
                       <input type="hidden" name="target" value="{{ r.target }}">
                       <input type="hidden" name="target_type" value="{{ target_type }}">
                       <input type="hidden" name="verdict" value="allow">
@@ -59,6 +60,7 @@
                     <form method="post" action="/ui/rules/add" class="inline"
                           data-confirm="Block all mail from {{ r.target }}?"
                           data-confirm-action="Block">
+                      {% include "_csrf.html" %}
                       <input type="hidden" name="target" value="{{ r.target }}">
                       <input type="hidden" name="target_type" value="{{ target_type }}">
                       <input type="hidden" name="verdict" value="deny">

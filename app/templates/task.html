@@ -117,6 +117,7 @@
           <code>{{ received_dates | min }}</code>
         </p>
         <form action="/ui/tasks/{{ task.task_id }}/next" method="post" class="inline">
+          {% include "_csrf.html" %}
           <button type="submit" class="primary">Next page →</button>
         </form>
         <p class="meta hint">Continues older than the oldest message in this audit.</p>
@@ -269,12 +270,14 @@
                           method="post" class="inline"
                           data-confirm="Always allow {{ m.from }}?"
                           data-confirm-action="Allow">
+                      {% include "_csrf.html" %}
                       <button type="submit" class="rule-btn allow" title="Always allow this sender">✓</button>
                     </form>
                     <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/rule/deny"
                           method="post" class="inline"
                           data-confirm="Always block {{ m.from }} and delete this message?"
                           data-confirm-action="Block + delete">
+                      {% include "_csrf.html" %}
                       <button type="submit" class="rule-btn deny" title="Always block this sender">✕</button>
                     </form>
                   {% endif %}
@@ -348,6 +351,14 @@
 
           bulkForm.action = `/ui/tasks/${taskId}/bulk/${action}`;
           bulkForm.replaceChildren();
+          const csrfMatch = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+          if (csrfMatch) {
+            const tok = document.createElement('input');
+            tok.type = 'hidden';
+            tok.name = 'csrftoken';
+            tok.value = decodeURIComponent(csrfMatch[1]);
+            bulkForm.appendChild(tok);
+          }
           ids.forEach(id => {
             const input = document.createElement('input');
             input.type = 'hidden';

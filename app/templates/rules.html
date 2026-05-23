@@ -17,6 +17,7 @@
   <div class="panel" style="margin: 1.5rem 0">
     <h2 style="margin-top: 0; font-size: 1rem">Add rule</h2>
     <form method="post" action="/ui/rules/add" class="rule-form">
+      {% include "_csrf.html" %}
       <input type="text" name="target" placeholder="user@example.com  ·  example.com  ·  mealpal" required>
       <select name="target_type" title="What to match against">
         <option value="address">address (exact)</option>
@@ -69,6 +70,7 @@
               <td style="text-align: right">
                 <form method="post" action="/ui/rules/delete" class="inline"
                       data-confirm="Remove this rule?" data-confirm-action="Remove">
+                  {% include "_csrf.html" %}
                   <input type="hidden" name="target" value="{{ r.target }}">
                   <input type="hidden" name="target_type" value="{{ r.target_type }}">
                   <button type="submit" class="small">remove</button>

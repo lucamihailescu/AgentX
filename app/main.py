@@ -23,6 +23,7 @@ from .auth import (
     verify_cli_token,
 )
 from .config import settings
+from .csrf import CSRFMiddleware
 from .db import init_db
 from . import chat as chat_module
 from . import rspamd_client
@@ -100,7 +101,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="agentx — multi-provider mailbox agent", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=settings.session_secret)
+
+# When PUBLIC_BASE_URL is set the agent is reachable over HTTPS (typically
+# behind cloudflared / a reverse proxy), so harden the session cookie and
+# enforce CSRF on every state-changing form. For localhost dev neither is
+# strictly required, but CSRF stays on — it only costs one hidden input
+# per form and catches regressions early.
+_is_public = bool(settings.public_base_url)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.session_secret,
+    https_only=_is_public,
+    same_site="lax",
+)
+app.add_middleware(CSRFMiddleware, secure=_is_public)
 
 
 def _require_user(request: Request) -> str:

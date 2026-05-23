@@ -69,3 +69,28 @@ services:
     volumes:
       - ./data/redis:/data
     command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+
+  # Cloudflare Tunnel — exposes the agent on a public hostname without
+  # opening any inbound ports. Set TUNNEL_TOKEN in .env to enable; leave
+  # blank to keep the agent localhost-only.
+  #
+  # 1. Create a named tunnel in the Cloudflare Zero Trust dashboard
+  #    (Networks → Tunnels → Create a tunnel) and copy the connector
+  #    token. Point the tunnel's public hostname at `http://agent:8080`.
+  # 2. Add an Access policy on that hostname restricting to your email(s).
+  # 3. Re-register the public callback URL in Entra + Google Cloud
+  #    Console: https://<your-hostname>/auth/microsoft/callback and the
+  #    Google equivalent.
+  # 4. Set AGENT_PUBLIC_BASE_URL=https://<your-hostname> in .env so the
+  #    OAuth flows use it.
+  #
+  # Only runs when TUNNEL_TOKEN is non-empty (otherwise this service
+  # exits immediately, which is harmless).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${TUNNEL_TOKEN:-}"]
+    depends_on:
+      - agent
+    profiles:
+      - tunnel

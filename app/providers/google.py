@@ -18,7 +18,7 @@ import aiosqlite
 import logging
 
 from ..auth import CacheKeyError, _decrypt_blob, _encrypt_blob, _now
-from ..config import settings
+from ..config import redirect_uri_for, settings
 from ..unsubscribe import find_unsubscribe
 from .base import AuthError, MailboxProvider, Message
 
@@ -270,9 +270,10 @@ class GoogleProvider(MailboxProvider):
             raise AuthError("Google provider not configured")
         verifier, challenge = _make_pkce_pair()
         state = secrets.token_urlsafe(16)
+        redirect_uri = redirect_uri_for("google")
         params = {
             "client_id": settings.google_client_id,
-            "redirect_uri": settings.google_redirect_uri,
+            "redirect_uri": redirect_uri,
             "response_type": "code",
             "scope": " ".join(settings.google_scopes + ["openid", "email", "profile"]),
             "access_type": "offline",
@@ -285,7 +286,7 @@ class GoogleProvider(MailboxProvider):
             "auth_uri": f"{_AUTH_ENDPOINT}?{urlencode(params)}",
             "state": state,
             "code_verifier": verifier,
-            "redirect_uri": settings.google_redirect_uri,
+            "redirect_uri": redirect_uri,
         }
 
     @classmethod

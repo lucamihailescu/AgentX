@@ -667,6 +667,7 @@
           <span class="nav-sep">·</span>
           <span>{{ username }}</span>
           <form action="/auth/logout" method="post" class="inline">
+            {% include "_csrf.html" %}
             <button type="submit" class="small">sign out</button>
           </form>
         </div>

@@ -10,6 +10,7 @@
       <form action="/ui/chat/clear" method="post" class="inline"
             data-confirm="Clear the entire conversation history?"
             data-confirm-action="Clear">
+        {% include "_csrf.html" %}
         <button type="submit" class="small">clear history</button>
       </form>
     </div>
@@ -39,6 +40,7 @@
   </div>
 
   <form action="/ui/chat/send" method="post" class="chat-form" id="chat-form">
+    {% include "_csrf.html" %}
     <textarea name="message" rows="3" required autofocus
               placeholder="What spam from MealPal did I get this week? · How many rules do I have? · …"></textarea>
     <button type="submit" class="primary">send</button>
@@ -194,9 +196,12 @@
         try {
           const fd = new FormData();
           fd.append('message', message);
+          const csrfMatch = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+          const headers = { 'Accept': 'text/plain' };
+          if (csrfMatch) headers['X-CSRF-Token'] = decodeURIComponent(csrfMatch[1]);
           const resp = await fetch('/ui/chat/send', {
             method: 'POST',
-            headers: { 'Accept': 'text/plain' },
+            headers,
             body: fd,
           });
           if (!resp.ok || !resp.body) {
