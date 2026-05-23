@@ -137,7 +137,12 @@ class Worker:
             )
         messages = await auto_delete(provider, user_id, messages, rules)
         classified = await classify_messages(
-            messages, rules, examples=examples, priors=priors
+            messages,
+            rules,
+            examples=examples,
+            priors=priors,
+            user_id=user_id,
+            provider=provider,
         )
         report = await generate_report(classified)
         await self._update(task_id, status="completed", result_data=json.dumps(report))

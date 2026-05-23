@@ -491,6 +491,28 @@ class GoogleProvider(MailboxProvider):
             )
 
     @classmethod
+    async def fetch_raw(cls, user_id: str, message_id: str) -> bytes:
+        """Fetch the full RFC 822 bytes via Gmail's `format=raw` endpoint.
+        Used for lazy-escalation Rspamd re-checks on borderline verdicts."""
+        token = await cls.acquire_access_token(user_id)
+        resp = await cls.request_with_retry(
+            "GET",
+            f"{_GMAIL_BASE}/users/me/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"format": "raw"},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Gmail GET (raw) returned {resp.status_code}: {resp.text[:200]}"
+            )
+        raw_b64 = (resp.json() or {}).get("raw") or ""
+        if not raw_b64:
+            return b""
+        # Gmail returns URL-safe base64; pad before decoding.
+        pad = "=" * (-len(raw_b64) % 4)
+        return base64.urlsafe_b64decode(raw_b64 + pad)
+
+    @classmethod
     async def fetch_message_body(cls, user_id: str, message_id: str) -> dict:
         token = await cls.acquire_access_token(user_id)
         resp = await cls.request_with_retry(

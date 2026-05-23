@@ -38,8 +38,34 @@ services:
       AGENT_SUGGEST_MAX_ITEMS: ${SUGGEST_MAX_ITEMS:-5}
       AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES: ${DEFAULT_SCHEDULE_INTERVAL_MINUTES:-}
       AGENT_SCHEDULER_TICK_SECONDS: ${SCHEDULER_TICK_SECONDS:-60}
+      AGENT_RSPAMD_URL: ${RSPAMD_URL:-http://rspamd:11333}
+      AGENT_RSPAMD_WEIGHT: ${RSPAMD_WEIGHT:-0.6}
+      AGENT_RSPAMD_TIMEOUT_SECONDS: ${RSPAMD_TIMEOUT_SECONDS:-3.0}
     volumes:
       # Bind-mount to a host directory so `docker compose down -v`
       # does NOT touch the SQLite file or ChromaDB store. Both live in
       # ./data/ on the host (./data/tasks.db and ./data/chroma/).
       - ./data:/data
+    depends_on:
+      - rspamd
+
+  rspamd:
+    image: rspamd/rspamd:3.8
+    # Per-user Bayes + Redis backend wired via mounted local.d overrides.
+    # Ports kept internal — only the agent container talks to rspamd.
+    expose:
+      - "11333"   # normal worker (checkv2, learnspam, learnham)
+    volumes:
+      - ./rspamd/local.d:/etc/rspamd/local.d:ro
+      - ./data/rspamd:/var/lib/rspamd
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    # Backing store for rspamd's per-user Bayes tokens. Persisted via volume.
+    expose:
+      - "6379"
+    volumes:
+      - ./data/redis:/data
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]

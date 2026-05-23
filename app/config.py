@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     # the model's verdict. Disable to make Ollama's call authoritative.
     calibration_enabled: bool = True
 
+    # ── Rspamd second-opinion classifier ─────────────────────────────────
+    # When set, every message classified by Ollama is also checked against
+    # Rspamd and the two verdicts are blended (plus the per-sender prior).
+    # Set to None / empty to disable. User actions (delete/unsub/allow/deny)
+    # additionally train Rspamd's per-user Bayes when enabled.
+    rspamd_url: str | None = None
+    # Weight of Rspamd's verdict in the blend, relative to Ollama (weight 1.0).
+    # 0.6 ≈ "trusted second opinion"; 1.0 = equal vote; 0 disables.
+    rspamd_weight: float = 0.6
+    rspamd_timeout_seconds: float = 3.0
+
     # Chat (mem0 + Ollama embeddings + ChromaDB) ──────────────────────────
     # Falls back to `ollama_model` when unset/empty so a single OLLAMA_MODEL
     # env var configures both the classifier and the chat. Override only to

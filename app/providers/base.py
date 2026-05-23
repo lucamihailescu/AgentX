@@ -188,6 +188,16 @@ class MailboxProvider:
         raise NotImplementedError
 
     @classmethod
+    async def fetch_raw(cls, user_id: str, message_id: str) -> bytes:
+        """Fetch the full RFC 822 byte stream of a single message.
+
+        Used by the lazy-escalation Rspamd pass on borderline verdicts so
+        Rspamd can analyze real headers (DKIM/SPF/Received), URLs, and
+        attachment metadata — signal that's lost when we synthesize MIME
+        from the metadata + preview we already have."""
+        raise NotImplementedError
+
+    @classmethod
     async def fetch_message_body(cls, user_id: str, message_id: str) -> dict:
         """Fetch the full body of a single message. Returns:
             {"subject": str|None, "from": str|None, "received": str|None,

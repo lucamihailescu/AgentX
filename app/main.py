@@ -25,6 +25,7 @@ from .auth import (
 from .config import settings
 from .db import init_db
 from . import chat as chat_module
+from . import rspamd_client
 from . import rules as rules_module
 from . import sender_stats
 from . import suggestions
@@ -450,6 +451,7 @@ async def ui_delete_message(task_id: str, message_id: str, request: Request):
     target["deleted_at"] = datetime.now(timezone.utc).isoformat()
     await _save_result(task_id, task["result"])
     await sender_stats.bump_action(user_id, target.get("from"), deleted=1)
+    rspamd_client.fire_learn(target, user_id, "spam")
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
@@ -463,6 +465,7 @@ async def ui_unsubscribe_message(task_id: str, message_id: str, request: Request
     await _do_unsubscribe(target)
     await _save_result(task_id, task["result"])
     await sender_stats.bump_action(user_id, target.get("from"), unsubscribed=1)
+    rspamd_client.fire_learn(target, user_id, "spam")
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
@@ -567,6 +570,16 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
     await _save_result(task_id, task["result"])
     for sender, d, u in bumps:
         await sender_stats.bump_action(user_id, sender, deleted=d, unsubscribed=u)
+    # Train Rspamd on every successfully-actioned message. Allow/deny bulk
+    # variants are labeled by intent; delete/unsub are always "spam".
+    learn_label = "ham" if action == "allow" else "spam"
+    if do_rule or do_delete or do_unsub:
+        for target in targets:
+            if (
+                target.get("deleted") or target.get("unsubscribed")
+                or target.get("rule_applied") == "allow"
+            ):
+                rspamd_client.fire_learn(target, user_id, learn_label)
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
@@ -612,6 +625,9 @@ async def ui_set_rule(task_id: str, message_id: str, verdict: str, request: Requ
     await _save_result(task_id, task["result"])
     if bumped_delete:
         await sender_stats.bump_action(user_id, sender, deleted=1)
+    rspamd_client.fire_learn(
+        target, user_id, "spam" if verdict == "deny" else "ham"
+    )
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
@@ -723,6 +739,7 @@ async def ui_unsubscribe_and_delete(task_id: str, message_id: str, request: Requ
     await sender_stats.bump_action(
         user_id, target.get("from"), deleted=1, unsubscribed=bumped_unsub
     )
+    rspamd_client.fire_learn(target, user_id, "spam")
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 

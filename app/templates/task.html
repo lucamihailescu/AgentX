@@ -243,7 +243,11 @@
                   {% endif %}
                   {% if m.calibration_applied and not m.rule_applied and not m.auto_deleted %}
                     <span class="cal-badge cal-{{ m.calibration_applied }}"
-                          title="adjusted using your past actions — {{ m.prior_n_actions }} delete/unsub against this sender">cal</span>
+                          title="blended verdict — sources: {{ (m.blend_sources or []) | join(', ') }}{% if m.prior_n_actions %} · {{ m.prior_n_actions }} prior delete/unsub{% endif %}{% if m.rspamd_score is not none %} · rspamd score {{ m.rspamd_score }}{% endif %}">cal</span>
+                  {% endif %}
+                  {% if m.rspamd_escalated and not m.rule_applied and not m.auto_deleted %}
+                    <span class="cal-badge cal-raw"
+                          title="borderline verdict — re-checked against full raw MIME (real headers, URLs, attachments)">raw</span>
                   {% endif %}
                   {% if m.confidence is not none and not m.deleted and not m.unsubscribed and not m.auto_deleted and not m.rule_applied %}
                     <div class="conf">{{ '%.0f'|format(m.confidence * 100) }}% conf</div>
@@ -488,6 +492,11 @@
       color: var(--bg);
       background: var(--accent);
       border-color: var(--accent);
+    }
+    .cal-badge.cal-raw {
+      color: var(--ham);
+      background: var(--ham-tint);
+      border-color: color-mix(in srgb, var(--ham) 40%, transparent);
     }
 
     .from {

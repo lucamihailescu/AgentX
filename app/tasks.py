@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import httpx
 
 from . import calibration
+from . import rspamd_client
 from .config import BLOCKED_DOMAINS, settings
 from .ollama_client import classify
 from .providers import MailboxProvider
@@ -12,6 +13,11 @@ from .providers.base import AuthError
 from .rules import lookup as lookup_rule
 
 logger = logging.getLogger(__name__)
+
+# Confidence below this triggers a lazy-escalation Rspamd recheck against
+# the full raw MIME (fetched from the provider) instead of the synthesized
+# envelope. Rough rule: anything where blended p_spam ∈ [0.30, 0.70].
+_ESCALATION_CONFIDENCE = 0.70
 
 
 def is_blocked(address: str | None, blocked: frozenset[str] | set[str]) -> bool:
@@ -90,6 +96,8 @@ async def auto_delete(
         if rule_denied:
             out["rule_applied"] = "deny"
             out["reason"] = "denylisted sender"
+        # Strong "spam" signal — train Rspamd's per-user Bayes on it.
+        rspamd_client.fire_learn(out, user_id, "spam")
         return out
 
     return await asyncio.gather(*(_maybe_delete(m) for m in messages))
@@ -100,25 +108,37 @@ async def classify_messages(
     rules: dict[tuple[str, str], str] | None = None,
     examples: tuple[list[dict], list[dict]] | None = None,
     priors: dict[str, dict] | None = None,
+    user_id: str | None = None,
+    provider: type[MailboxProvider] | None = None,
 ) -> list[dict]:
-    """Run each non-auto-deleted message through Ollama in parallel.
+    """Run each non-auto-deleted message through Ollama (and optionally
+    Rspamd) in parallel, then blend the verdicts with the per-sender prior.
 
-    `examples` is `(ham, spam)` — past-audit examples that get injected as
-    few-shot context for every Ollama call so the model calibrates to the
-    user's actual taste.
+    Signals combined per message (see `calibration.blend`):
+      - Ollama: textual LLM verdict, with few-shot examples for taste.
+      - Rspamd: email-tuned heuristics + per-user Bayes, when configured.
+      - Per-sender prior: accumulated delete/unsub actions from sender_stats.
 
-    `priors` is `{sender_address: {n_seen, n_actions}}` — accumulated
-    delete/unsub history per sender, blended into the model's verdict
-    by `calibration.apply`. Senders not in the map (or below the action
-    threshold) are unaffected.
+    When `provider` is given and a message's blended confidence is below
+    `_ESCALATION_CONFIDENCE`, the raw RFC 822 is fetched and Rspamd is
+    re-run — recovering the URL / DKIM / attachment signal that the
+    synthesized envelope misses. The escalation re-blends with the same
+    Ollama verdict + prior; only the Rspamd input changes.
+
+    Each Ollama + Rspamd pair runs concurrently for a single message;
+    cross-message parallelism is bounded by `ollama_concurrency`.
     """
     rules = rules or {}
     priors = priors or {}
     ham_examples, spam_examples = examples or ([], [])
     semaphore = asyncio.Semaphore(settings.ollama_concurrency)
+    rspamd_on = rspamd_client.is_enabled() and user_id is not None
+    escalation_on = rspamd_on and provider is not None
+    escalations = 0
     async with httpx.AsyncClient(base_url=settings.ollama_url) as client:
 
         async def _one(message: dict) -> dict:
+            nonlocal escalations
             if message.get("auto_deleted"):
                 return message
             ruled = lookup_rule(rules, message.get("from"), message.get("subject"))
@@ -139,19 +159,63 @@ async def classify_messages(
                     "rule_applied": "deny",
                 }
             async with semaphore:
-                verdict = await classify(
+                ollama_coro = classify(
                     client,
                     message,
                     ham_examples=ham_examples,
                     spam_examples=spam_examples,
                 )
+                if rspamd_on:
+                    ollama_verdict, rspamd_verdict = await asyncio.gather(
+                        ollama_coro,
+                        rspamd_client.check(message, user_id),
+                    )
+                else:
+                    ollama_verdict = await ollama_coro
+                    rspamd_verdict = None
             sender = (message.get("from") or "").strip().lower()
             prior = priors.get(sender) if sender else None
-            if prior:
-                verdict = calibration.apply(verdict, prior)
-            return {**message, **verdict}
+            blended = calibration.blend(
+                ollama_verdict, rspamd=rspamd_verdict, prior=prior
+            )
 
-        return await asyncio.gather(*(_one(m) for m in messages))
+            # Lazy escalation: borderline blended verdict → fetch the
+            # raw MIME and re-run Rspamd on it. Skips messages we already
+            # short-circuited (rule/auto_deleted), and skips when there's
+            # no provider to fetch from.
+            if (
+                escalation_on
+                and message.get("id")
+                and (blended.get("confidence") or 1.0) < _ESCALATION_CONFIDENCE
+            ):
+                raw = None
+                async with semaphore:
+                    try:
+                        raw = await provider.fetch_raw(user_id, message["id"])
+                    except Exception as exc:
+                        logger.warning(
+                            "rspamd-escalation fetch_raw failed for %s: %s",
+                            message["id"], exc,
+                        )
+                if raw:
+                    rspamd_raw = await rspamd_client.check_raw(
+                        raw, message, user_id
+                    )
+                    if rspamd_raw is not None:
+                        blended = calibration.blend(
+                            ollama_verdict, rspamd=rspamd_raw, prior=prior
+                        )
+                        blended["rspamd_escalated"] = True
+                        escalations += 1
+            return {**message, **blended}
+
+        result = await asyncio.gather(*(_one(m) for m in messages))
+        if escalation_on and escalations:
+            logger.info(
+                "rspamd lazy-escalation: re-checked %d borderline message(s) with raw MIME",
+                escalations,
+            )
+        return result
 
 
 async def purge_mailbox(

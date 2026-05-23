@@ -208,6 +208,22 @@ class MicrosoftProvider(MailboxProvider):
             )
 
     @classmethod
+    async def fetch_raw(cls, user_id: str, message_id: str) -> bytes:
+        """Fetch the full RFC 822 / EML bytes via Graph's $value endpoint.
+        Used for lazy-escalation Rspamd re-checks on borderline verdicts."""
+        token = await cls.acquire_access_token(user_id)
+        resp = await cls.request_with_retry(
+            "GET",
+            f"{_GRAPH_BASE}/me/messages/{message_id}/$value",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Graph GET ($value) returned {resp.status_code}: {resp.text[:200]}"
+            )
+        return resp.content
+
+    @classmethod
     async def fetch_message_body(cls, user_id: str, message_id: str) -> dict:
         token = await cls.acquire_access_token(user_id)
         resp = await cls.request_with_retry(

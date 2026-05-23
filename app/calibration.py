@@ -1,19 +1,19 @@
-"""Per-sender calibration on top of the Ollama classifier.
+"""Multi-signal verdict blending.
 
-The model is stateless — it sees each message in isolation. The user's
-history with a given sender is a strong, deterministic signal that we
-already collect in `sender_stats` (delete + unsub counts). This module
-blends that prior into the model's verdict using a weighted log-odds
-combination so:
+Combines up to three independent signals into the final spam verdict:
 
-  - confidence is boosted when model and prior agree
-  - the verdict flips when the prior is strong enough to outweigh
-    a borderline model call
-  - a model failure (verdict=None) falls back to the prior alone
+  1. Ollama (LLM, content-aware, slow, sometimes wrong)
+  2. Rspamd (email-tuned heuristics + per-user Bayes, fast, optional)
+  3. Per-sender prior (the user's own delete/unsub history from sender_stats)
 
-`sender_rules` already short-circuits Ollama entirely for explicit
-allow/deny entries — this module covers the *implicit* signal from
-accumulated actions where the user never wrote a rule.
+Each source contributes a p_spam in [0, 1] with a weight; the final
+probability is a weighted average. Verdict transitions vs the model's
+original call (flip / fill / adjust) are annotated so the UI can show
+when blending changed the answer.
+
+`sender_rules` short-circuits this whole pipeline upstream for explicit
+allow/deny entries — this layer is for the *implicit* signal where the
+user hasn't written a rule yet.
 """
 
 from __future__ import annotations
@@ -23,18 +23,14 @@ import aiosqlite
 from .config import settings
 
 
-# Minimum user actions before the prior is allowed to influence the
-# verdict at all. Below this, we trust the model.
-MIN_ACTIONS = 2
-# Number of actions at which the prior reaches full weight. Anything
-# above this is capped — diminishing returns past a point.
-MAX_ACTIONS = 5
+# Per-sender prior thresholds.
+MIN_ACTIONS = 2  # below this, the prior is ignored entirely
+MAX_ACTIONS = 5  # action count at which the prior reaches full weight
 
 
 async def load_priors(user_id: str) -> dict[str, dict]:
-    """Return a `{sender_address: {n_seen, n_actions}}` map for every
-    sender this user has any action history with. Excludes senders with
-    zero actions to keep the map small — they wouldn't qualify anyway.
+    """Return `{sender_address: {n_seen, n_actions}}` for every sender
+    with at least `MIN_ACTIONS` user actions on record.
     """
     if not settings.calibration_enabled:
         return {}
@@ -56,61 +52,116 @@ async def load_priors(user_id: str) -> dict[str, dict]:
         }
 
 
-def apply(verdict: dict, prior: dict) -> dict:
-    """Blend the model verdict with the sender's prior.
-
-    `verdict` is the dict returned by ollama_client.classify (or that
-    shape produced upstream). `prior` is one entry from `load_priors`.
-    Mutates a copy of verdict and returns it.
-    """
+def _prior_p_and_weight(prior: dict | None) -> tuple[float, float] | None:
+    """Return `(p_spam, weight)` for a per-sender prior, or None if the
+    prior is too weak to count."""
+    if not prior:
+        return None
     n_actions = prior["n_actions"]
-    n_seen = max(prior["n_seen"], n_actions)  # in case stats lag
+    n_seen = max(prior["n_seen"], n_actions)
     if n_actions < MIN_ACTIONS:
-        return verdict
+        return None
+    p = (n_actions + 1) / (n_seen + 2)            # Laplace-smoothed
+    w = min(n_actions, MAX_ACTIONS) / MAX_ACTIONS  # 0..1
+    return p, w
 
-    # Laplace-smoothed P(spam | sender).
-    p_prior = (n_actions + 1) / (n_seen + 2)
-    weight = min(n_actions, MAX_ACTIONS) / MAX_ACTIONS  # 0..1
 
-    orig_spam = verdict.get("spam")
-    orig_conf = verdict.get("confidence")
+def blend(
+    ollama: dict,
+    *,
+    rspamd: dict | None = None,
+    prior: dict | None = None,
+) -> dict:
+    """Combine the Ollama verdict with optional Rspamd and per-sender prior.
 
-    if orig_spam is None:
-        # Model failed — fall back to prior alone.
-        p_combined = p_prior
-    else:
+    `ollama` is the verdict dict from ollama_client.classify.
+    `rspamd` is `{"p_spam": float, "score": float, "action": str, "symbols": list}`
+        or None.
+    `prior` is `{"n_seen", "n_actions"}` or None.
+
+    Returns a new verdict dict with `spam`, `confidence`, `reason`, and
+    annotation fields. Falls back gracefully when sources are missing.
+    """
+    orig_spam = ollama.get("spam")
+    orig_conf = ollama.get("confidence")
+    base_reason = (ollama.get("reason") or "").strip()
+
+    sources: list[tuple[float, float, str]] = []  # (weight, p_spam, label)
+
+    ollama_failed = orig_spam is None
+    if not ollama_failed:
         m_conf = orig_conf if isinstance(orig_conf, (int, float)) else 0.5
-        p_model = m_conf if orig_spam else (1.0 - m_conf)
-        p_combined = (1.0 - weight) * p_model + weight * p_prior
+        p_o = m_conf if orig_spam else (1.0 - m_conf)
+        sources.append((1.0, p_o, "ollama"))
+
+    if rspamd is not None:
+        # Weight from settings; 0 effectively disables.
+        rw = max(settings.rspamd_weight, 0.0)
+        if rw > 0:
+            sources.append((rw, float(rspamd["p_spam"]), "rspamd"))
+
+    prior_pw = _prior_p_and_weight(prior)
+    if prior_pw is not None:
+        p_pr, w_pr = prior_pw
+        sources.append((w_pr, p_pr, "prior"))
+
+    if not sources:
+        # Nothing to combine and Ollama failed — preserve the failure state.
+        return dict(ollama)
+
+    total_w = sum(w for w, _, _ in sources)
+    p_combined = sum(w * p for w, p, _ in sources) / total_w
 
     new_spam = p_combined > 0.5
     new_conf = round(max(p_combined, 1.0 - p_combined), 3)
+    used = [label for _, _, label in sources]
 
-    out = {**verdict, "spam": new_spam, "confidence": new_conf}
+    out = {**ollama, "spam": new_spam, "confidence": new_conf, "blend_sources": used}
 
-    flipped = orig_spam is not None and orig_spam != new_spam
-    failed = orig_spam is None
-    base_reason = (verdict.get("reason") or "").strip()
-    action_word = "action" if n_actions == 1 else "actions"
+    # Stash raw signals for downstream UI / debugging.
+    if rspamd is not None:
+        out["rspamd_score"] = round(float(rspamd["score"]), 2)
+        out["rspamd_action"] = rspamd.get("action")
+        if rspamd.get("symbols"):
+            out["rspamd_symbols"] = list(rspamd["symbols"])[:8]
+    if prior_pw is not None:
+        out["prior_n_actions"] = int(prior["n_actions"])
+        out["prior_n_seen"] = int(prior["n_seen"])
 
-    if flipped or failed:
+    # Annotation: did blending change the model's call?
+    flipped = (not ollama_failed) and orig_spam != new_spam
+    filled = ollama_failed
+    if flipped or filled:
         out["calibration_applied"] = "flipped" if flipped else "filled"
-        prefix = base_reason or ("model failed" if failed else "")
+        prefix = base_reason or ("model failed" if filled else "")
         sep = " — " if prefix else ""
-        out["reason"] = (
-            f"{prefix}{sep}calibrated: {n_actions} prior {action_word} against "
-            f"this sender"
+        sig_summary = _signal_summary(rspamd, prior)
+        out["reason"] = f"{prefix}{sep}{sig_summary}" if sig_summary else (
+            prefix or "blended"
         )
-    else:
-        # Same verdict — the prior shifted confidence in one direction or
-        # the other. Skip noise (< 0.05 shift).
-        if orig_conf is None or abs(new_conf - orig_conf) >= 0.05:
-            out["calibration_applied"] = "adjusted"
-            if base_reason:
-                out["reason"] = (
-                    f"{base_reason} (±{n_actions} prior {action_word})"
-                )
+    elif (orig_conf is None or abs(new_conf - orig_conf) >= 0.05) and len(sources) > 1:
+        out["calibration_applied"] = "adjusted"
+        sig_summary = _signal_summary(rspamd, prior)
+        if base_reason and sig_summary:
+            out["reason"] = f"{base_reason} ({sig_summary})"
 
-    out["prior_n_actions"] = n_actions
-    out["prior_n_seen"] = n_seen
     return out
+
+
+def _signal_summary(rspamd: dict | None, prior: dict | None) -> str:
+    """Short human-readable description of the non-Ollama signals."""
+    parts: list[str] = []
+    if rspamd is not None:
+        parts.append(f"rspamd {rspamd.get('action', '?')} (score {rspamd.get('score', 0):.1f})")
+    prior_pw = _prior_p_and_weight(prior)
+    if prior_pw is not None and prior is not None:
+        n = prior["n_actions"]
+        parts.append(f"{n} prior action{'s' if n != 1 else ''}")
+    return ", ".join(parts)
+
+
+# Back-compat shim: the previous version had `apply(verdict, prior)`. Internal
+# call sites have been migrated to `blend`; leaving this here covers any tests
+# / external callers that still use the old name.
+def apply(verdict: dict, prior: dict) -> dict:
+    return blend(verdict, prior=prior)
