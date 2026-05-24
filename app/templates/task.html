@@ -297,6 +297,9 @@
   {% endif %}{# /audit-vs-purge branch #}
 
   <script>
+    // ───── bulk-action bar ─────
+    // Only present when has_actionable rendered the bulk-bar + bulk-form
+    // elements. If they're missing, this whole block is a no-op.
     (() => {
       const bulkBar = document.getElementById('bulk-bar');
       const bulkForm = document.getElementById('bulk-form');
@@ -378,10 +381,13 @@
       });
 
       updateSelection();
+    })();
 
-      // ───── filter bar ─────
+    // ───── filter bar ─────
+    (() => {
       const filterText = document.getElementById('filter-text');
       const chips = document.querySelectorAll('.chip[data-filter-status]');
+      if (!filterText && chips.length === 0) return;
       let activeStatus = '';
 
       function applyFilter() {
@@ -401,8 +407,12 @@
           applyFilter();
         });
       });
+    })();
 
-      // ───── inline body preview ─────
+    // ───── inline body preview ─────
+    // Independent of bulk-bar / filter so it works even when the audit has
+    // no actionable rows.
+    (() => {
       const taskIdForBody = "{{ task.task_id }}";
       document.querySelectorAll('td.subject.expandable').forEach(cell => {
         cell.addEventListener('click', (e) => {

@@ -41,6 +41,7 @@ services:
       AGENT_RSPAMD_URL: ${RSPAMD_URL:-http://rspamd:11333}
       AGENT_RSPAMD_WEIGHT: ${RSPAMD_WEIGHT:-0.6}
       AGENT_RSPAMD_TIMEOUT_SECONDS: ${RSPAMD_TIMEOUT_SECONDS:-3.0}
+      AGENT_PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     volumes:
       # Bind-mount to a host directory so `docker compose down -v`
       # does NOT touch the SQLite file or ChromaDB store. Both live in
