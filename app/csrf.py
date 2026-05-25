@@ -29,8 +29,6 @@ import secrets
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qsl
 
-from starlette.datastructures import State
-
 logger = logging.getLogger(__name__)
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -152,13 +150,17 @@ class CSRFMiddleware:
         cookie_val = _cookie_value(scope, _COOKIE_NAME)
         token = cookie_val or secrets.token_urlsafe(32)
 
-        # Make request.state.csrftoken work in templates. Starlette uses
-        # a State object on scope["state"]; mirror that contract.
+        # Make request.state.csrftoken work in templates. Starlette's
+        # `Request.state` wraps `scope["state"]` (a dict) in a State
+        # object on every access — so we stash the token in the dict and
+        # let Starlette do the attribute wrapping. Setting `scope["state"]`
+        # to a State directly would cause Starlette to wrap-a-State and
+        # break attribute lookup at template render time.
         state = scope.get("state")
-        if not isinstance(state, State):
-            state = State()
+        if not isinstance(state, dict):
+            state = {}
             scope["state"] = state
-        state.csrftoken = token
+        state["csrftoken"] = token
 
         method = scope["method"]
         receive_for_app = receive
