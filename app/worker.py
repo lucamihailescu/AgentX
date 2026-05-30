@@ -37,6 +37,7 @@ class Worker:
         self._stop.set()
 
     async def run(self) -> None:
+        await self._reap_orphans()
         while not self._stop.is_set():
             try:
                 claimed = await self._claim_next()
@@ -47,6 +48,36 @@ class Worker:
             except Exception:
                 logger.exception("Worker loop error")
                 await asyncio.sleep(settings.worker_poll_interval_seconds)
+
+    async def _reap_orphans(self) -> None:
+        """Recover tasks orphaned by a hard process death.
+
+        A task is claimed by flipping 'queued' -> 'processing' (see
+        `_claim_next`). If the process is killed mid-run (container stop,
+        OOM, power loss) the row is stranded in 'processing' with no worker
+        owning it, and nothing would ever pick it back up. Clean failures go
+        through `_process`'s try/except and are marked 'failed', so a row
+        still in 'processing' at startup is always orphaned, never live —
+        this runs once before the claim loop, while no task is executing,
+        and the deployment is single-worker.
+
+        Reset them to 'queued' so the loop re-runs them. Audits/digests are
+        safe to re-run; purges resume from the top (already idempotent —
+        they only delete blocklisted senders).
+        """
+        async with aiosqlite.connect(settings.db_path) as db:
+            cur = await db.execute(
+                "UPDATE tasks SET status='queued', updated_at=? "
+                "WHERE status='processing'",
+                (_now(),),
+            )
+            await db.commit()
+            if cur.rowcount:
+                logger.warning(
+                    "reaped %d orphaned task(s) left in 'processing' by a "
+                    "previous run; re-queued for retry",
+                    cur.rowcount,
+                )
 
     async def _claim_next(self) -> dict | None:
         async with aiosqlite.connect(settings.db_path) as db:
