@@ -260,7 +260,10 @@
       border-radius: var(--radius);
       padding: 1.25rem 1.5rem;
     }
-    .panel.flush { padding: 0; overflow: hidden; }
+    /* Wide tables (e.g. senders) can exceed the layout width; scroll
+       horizontally instead of clipping the rightmost columns. overflow-y
+       stays hidden so the rounded corners still clip cleanly. */
+    .panel.flush { padding: 0; overflow-x: auto; overflow-y: hidden; }
 
     .page-head {
       display: flex;
