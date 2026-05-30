@@ -87,6 +87,42 @@ async def delete_rule(user_id: str, target: str, target_type: str) -> None:
         await db.commit()
 
 
+async def collapse_domain_denies(user_id: str, domain: str) -> int:
+    """Replace every `address`/`deny` rule under `domain` with one `domain`
+    deny rule, in a single transaction. Returns the count of address rules
+    removed. The domain deny is upserted (idempotent if one already exists).
+    """
+    domain_norm = (domain or "").strip().lower()
+    if not domain_norm:
+        raise ValueError("domain cannot be empty")
+    async with aiosqlite.connect(settings.db_path) as db:
+        cur = await db.execute(
+            """SELECT target FROM sender_rules
+               WHERE user_id = ? AND target_type = 'address' AND verdict = 'deny'
+                 AND target LIKE '%@%'""",
+            (user_id,),
+        )
+        targets = [
+            row[0] for row in await cur.fetchall()
+            if row[0].split("@", 1)[-1] == domain_norm
+        ]
+        await db.execute(
+            """INSERT INTO sender_rules (user_id, target, target_type, verdict, created_at)
+               VALUES (?, ?, 'domain', 'deny', ?)
+               ON CONFLICT(user_id, target, target_type) DO UPDATE SET
+                 verdict = excluded.verdict""",
+            (user_id, domain_norm, _now()),
+        )
+        for target in targets:
+            await db.execute(
+                """DELETE FROM sender_rules
+                   WHERE user_id = ? AND target = ? AND target_type = 'address'""",
+                (user_id, target),
+            )
+        await db.commit()
+    return len(targets)
+
+
 def lookup(
     rules: dict[tuple[str, str], str],
     address: str | None,

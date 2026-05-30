@@ -671,11 +671,13 @@ async def ui_senders(request: Request):
 async def ui_rules(request: Request):
     user_id = _require_user(request)
     rules = await rules_module.list_rules(user_id)
+    optimizations = await suggestions.list_rule_optimizations(user_id)
     return templates.TemplateResponse(
         request,
         "rules.html",
         {
             "rules": rules,
+            "optimizations": optimizations,
             "username": request.session.get("username"),
         },
     )
@@ -722,6 +724,30 @@ async def ui_suggestion_dismiss(request: Request):
     if target:
         await suggestions.dismiss(user_id, target, target_type, kind)
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/ui/rules/optimize")
+async def ui_rule_optimize(request: Request):
+    """Collapse all address denies under a domain into one domain deny rule."""
+    user_id = _require_user(request)
+    form = await request.form()
+    domain = (form.get("domain") or "").strip().lower()
+    if domain:
+        try:
+            await rules_module.collapse_domain_denies(user_id, domain)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return RedirectResponse("/ui/rules", status_code=303)
+
+
+@app.post("/ui/rules/optimize/dismiss")
+async def ui_rule_optimize_dismiss(request: Request):
+    user_id = _require_user(request)
+    form = await request.form()
+    domain = (form.get("domain") or "").strip().lower()
+    if domain:
+        await suggestions.dismiss(user_id, domain, "domain", "optimize")
+    return RedirectResponse("/ui/rules", status_code=303)
 
 
 @app.post("/ui/rules/delete")

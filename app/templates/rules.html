@@ -14,6 +14,42 @@
     deleted on the next audit. Address rules win over domain rules.
   </p>
 
+  {% if optimizations %}
+    <div class="panel optimize" style="margin: 1.5rem 0">
+      <h2 style="margin-top: 0; font-size: 1rem">Optimize rules</h2>
+      <p class="meta" style="margin: .25rem 0 1rem; max-width: 64ch; font-size: .82rem">
+        These domains each have several individual address deny rules. Collapse
+        them into a single domain deny rule — the address rules are removed and
+        one <code>domain · deny</code> rule takes their place.
+      </p>
+      {% for o in optimizations %}
+        <div class="optimize-row">
+          <div class="optimize-info">
+            <code class="optimize-domain">{{ o.domain }}</code>
+            <span class="meta" style="font-size: .78rem">
+              replaces {{ o.count }} address rules:
+              {{ o.addresses[:4] | join(', ') }}{% if o.count > 4 %} +{{ o.count - 4 }} more{% endif %}
+            </span>
+          </div>
+          <div class="optimize-actions">
+            <form method="post" action="/ui/rules/optimize" class="inline"
+                  data-confirm="Replace {{ o.count }} address rules with a domain deny for {{ o.domain }}?"
+                  data-confirm-action="Optimize">
+              {% include "_csrf.html" %}
+              <input type="hidden" name="domain" value="{{ o.domain }}">
+              <button type="submit" class="primary small">optimize</button>
+            </form>
+            <form method="post" action="/ui/rules/optimize/dismiss" class="inline">
+              {% include "_csrf.html" %}
+              <input type="hidden" name="domain" value="{{ o.domain }}">
+              <button type="submit" class="small">dismiss</button>
+            </form>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
   <div class="panel" style="margin: 1.5rem 0">
     <h2 style="margin-top: 0; font-size: 1rem">Add rule</h2>
     <form method="post" action="/ui/rules/add" class="rule-form">
@@ -114,6 +150,27 @@
       border-radius: var(--radius);
       font: inherit;
       font-size: .82rem;
+    }
+    .optimize-row {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      padding: .6rem 0;
+      border-top: 1px solid var(--border);
+    }
+    .optimize-info {
+      display: flex;
+      flex-direction: column;
+      gap: .15rem;
+      min-width: 240px;
+    }
+    .optimize-domain { font-size: .9rem; }
+    .optimize-actions {
+      display: flex;
+      gap: .5rem;
+      align-items: center;
     }
   </style>
 {% endblock %}
