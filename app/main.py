@@ -940,7 +940,7 @@ async def ui_settings(request: Request):
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            """SELECT schedule_interval_minutes, digest_interval_days, provider
+            """SELECT schedule_interval_minutes, provider
                FROM users WHERE user_id = ?""",
             (user_id,),
         )
@@ -970,8 +970,10 @@ async def ui_settings(request: Request):
             "username": request.session.get("username"),
             "schedule_interval_minutes": row["schedule_interval_minutes"] if row else None,
             "default_schedule_interval_minutes": settings.default_schedule_interval_minutes,
-            "digest_interval_days": row["digest_interval_days"] if row else None,
-            "default_digest_interval_days": settings.default_digest_interval_days,
+            "digest_enabled": settings.digest_enabled,
+            "digest_hour": settings.digest_hour,
+            "digest_timezone": settings.digest_timezone,
+            "digest_window_hours": settings.digest_window_hours,
             "last_audit_at": last_row["last_at"] if last_row else None,
             "last_digest_at": last_digest_row["last_at"] if last_digest_row else None,
             "provider_label": provider_label,
@@ -997,16 +999,12 @@ async def ui_settings_save(request: Request):
     interval = _parse_positive_int(
         form.get("schedule_interval_minutes"), "schedule_interval_minutes"
     )
-    digest_days = _parse_positive_int(
-        form.get("digest_interval_days"), "digest_interval_days"
-    )
     async with aiosqlite.connect(settings.db_path) as db:
         await db.execute(
             """UPDATE users
-               SET schedule_interval_minutes = ?, digest_interval_days = ?,
-                   updated_at = ?
+               SET schedule_interval_minutes = ?, updated_at = ?
                WHERE user_id = ?""",
-            (interval, digest_days, datetime.now(timezone.utc).isoformat(), user_id),
+            (interval, datetime.now(timezone.utc).isoformat(), user_id),
         )
         await db.commit()
     return RedirectResponse("/ui/settings", status_code=303)

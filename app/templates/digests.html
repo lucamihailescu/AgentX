@@ -40,7 +40,7 @@
               <td><code>{{ d.task_id[:8] }}</code></td>
               <td><span class="pill {{ d.status }}">{{ d.status }}</span></td>
               <td class="meta mono" style="font-size: .76rem">
-                {% if d.result %}{{ d.result.window_days }}d{% else %}—{% endif %}
+                {% if d.result %}{{ d.result.window_hours }}h{% else %}—{% endif %}
               </td>
               <td class="meta mono">
                 {% if d.result %}{{ d.result.counts.messages_scanned }}{% else %}—{% endif %}
