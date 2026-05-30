@@ -20,7 +20,7 @@
     <span class="eyebrow inline">created</span>&nbsp;{{ task.created_at }}
     {% if task.result %}
       &nbsp;·&nbsp;
-      <span class="eyebrow inline">window</span>&nbsp;<code>{{ task.result.window_days }} days</code>
+      <span class="eyebrow inline">window</span>&nbsp;<code>{{ task.result.window_hours }}h</code>
     {% endif %}
     {% if task.status in ("queued", "processing") %}
       &nbsp;·&nbsp; <span class="ar">auto-refreshing every 2s</span>
@@ -187,7 +187,7 @@
       <div class="panel">
         <div class="empty">
           Nothing to report — no completed audits in the last
-          {{ task.result.window_days }} days.
+          {{ task.result.window_hours }}h.
         </div>
       </div>
     {% endif %}

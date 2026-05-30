@@ -47,9 +47,9 @@ def _is_borderline(m: dict) -> bool:
     return False
 
 
-async def generate_digest(user_id: str, window_days: int) -> dict:
+async def generate_digest(user_id: str, window_hours: int) -> dict:
     now = datetime.now(timezone.utc)
-    since = (now - timedelta(days=window_days)).isoformat()
+    since = (now - timedelta(hours=window_hours)).isoformat()
 
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
@@ -140,7 +140,7 @@ async def generate_digest(user_id: str, window_days: int) -> dict:
     return {
         "kind": "digest",
         "generated_at": _now(),
-        "window_days": window_days,
+        "window_hours": window_hours,
         "window_start": since,
         "window_end": now.isoformat(),
         "counts": counts,

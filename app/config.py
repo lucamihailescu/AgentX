@@ -27,9 +27,13 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = 2.0
     default_schedule_interval_minutes: int | None = None
     scheduler_tick_seconds: float = 60.0
-    # Digest cadence in days. Per-user override on `users.digest_interval_days`
-    # wins. 0 / None disables.
-    default_digest_interval_days: int | None = 7
+    # Daily digest of the last 24h, emitted once each morning. digest_hour is
+    # the local hour (0-23) it fires; digest_timezone is the IANA zone that
+    # defines "local"; digest_window_hours is the look-back window.
+    digest_enabled: bool = True
+    digest_hour: int = 9
+    digest_timezone: str = "America/New_York"
+    digest_window_hours: int = 24
 
     max_messages_per_audit: int = 200
 

@@ -31,15 +31,17 @@
                placeholder="(disabled)" />
         <span class="unit">minutes</span>
       </label>
-      <label>
-        <span>Generate a digest every</span>
-        <input type="number" name="digest_interval_days" min="0"
-               value="{{ digest_interval_days or '' }}"
-               placeholder="{{ default_digest_interval_days or '(disabled)' }}" />
-        <span class="unit">days</span>
-      </label>
       <button type="submit" class="primary">save</button>
     </form>
+
+    <p class="meta" style="margin-top: 1rem; font-size: .8rem">
+      {% if digest_enabled %}
+        A digest of the last {{ digest_window_hours }}h is generated automatically
+        every morning at <code>{{ '%02d:00'|format(digest_hour) }} {{ digest_timezone }}</code>.
+      {% else %}
+        Daily digests are disabled.
+      {% endif %}
+    </p>
 
     <p class="meta" style="margin-top: 1.25rem; font-size: .8rem">
       <span class="eyebrow inline">last audit</span>&nbsp;

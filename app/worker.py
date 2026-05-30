@@ -3,6 +3,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 
@@ -126,20 +127,9 @@ class Worker:
     async def _process_digest(self, task: dict) -> None:
         task_id = task["task_id"]
         user_id = task["user_id"]
-        async with aiosqlite.connect(settings.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute(
-                "SELECT digest_interval_days FROM users WHERE user_id = ?",
-                (user_id,),
-            )
-            row = await cur.fetchone()
-        user_days = row["digest_interval_days"] if row else None
-        window_days = (
-            user_days
-            or settings.default_digest_interval_days
-            or 7
+        result = await digest_module.generate_digest(
+            user_id, settings.digest_window_hours
         )
-        result = await digest_module.generate_digest(user_id, window_days)
         await self._update(
             task_id, status="completed", result_data=json.dumps(result)
         )
@@ -292,41 +282,50 @@ class Scheduler:
             )
 
     async def _tick_digests(self) -> None:
-        default_days = settings.default_digest_interval_days
+        """Queue one digest per user each morning at `digest_hour` local time.
+
+        Fires on the first tick at/after the configured hour, and the
+        "already produced today" guard keeps it to a single digest per local
+        day. Fails closed (skips) on an unrecognized timezone rather than
+        silently falling back to UTC and mailing at the wrong hour.
+        """
+        if not settings.digest_enabled:
+            return
+        try:
+            tz = ZoneInfo(settings.digest_timezone)
+        except Exception:
+            logger.warning(
+                "Invalid AGENT_DIGEST_TIMEZONE %r; skipping digest tick",
+                settings.digest_timezone,
+            )
+            return
+        now_local = datetime.now(tz)
+        if now_local.hour < settings.digest_hour:
+            return  # before this morning's send time; nothing to do yet
+        today_local = now_local.date()
+
         async with aiosqlite.connect(settings.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                """SELECT u.user_id, u.digest_interval_days,
+                """SELECT u.user_id,
                           (SELECT MAX(created_at) FROM tasks t
                               WHERE t.user_id = u.user_id
-                                AND t.kind = 'digest') AS last_at,
-                          EXISTS(SELECT 1 FROM tasks t2
-                                 WHERE t2.user_id = u.user_id
-                                   AND t2.kind = 'digest'
-                                   AND t2.status IN ('queued', 'processing')) AS in_flight
+                                AND t.kind = 'digest') AS last_at
                    FROM users u"""
             )
             users = await cur.fetchall()
 
-        now = datetime.now(timezone.utc)
         for u in users:
-            user_days = u["digest_interval_days"]
-            interval_days = user_days if user_days else default_days
-            if not interval_days or interval_days <= 0:
-                continue
-            if u["in_flight"]:
-                continue
-            interval = timedelta(days=interval_days)
             if u["last_at"]:
                 last = datetime.fromisoformat(u["last_at"].replace("Z", "+00:00"))
-                if now - last < interval:
-                    continue
+                if last.astimezone(tz).date() >= today_local:
+                    continue  # already produced today's digest
             await self._insert_digest_task(u["user_id"])
             logger.info(
-                "scheduler queued digest for %s (interval=%sd, source=%s)",
+                "scheduler queued daily digest for %s (%02d:00 %s)",
                 u["user_id"],
-                interval_days,
-                "user" if user_days else "default",
+                settings.digest_hour,
+                settings.digest_timezone,
             )
 
     @staticmethod
