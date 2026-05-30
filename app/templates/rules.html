@@ -50,6 +50,46 @@
     </div>
   {% endif %}
 
+  {% if redundancies %}
+    <div class="panel optimize" style="margin: 1.5rem 0">
+      <h2 style="margin-top: 0; font-size: 1rem">Redundant rules</h2>
+      <p class="meta" style="margin: .25rem 0 1rem; max-width: 64ch; font-size: .82rem">
+        These rules are already covered by a broader rule with the same verdict,
+        so they have no effect. Removing them won't change how any message is
+        classified.
+      </p>
+      {% for g in redundancies %}
+        <div class="optimize-row">
+          <div class="optimize-info">
+            <span class="meta" style="font-size: .78rem">
+              covered by
+              <code>{{ g.covered_by.target_type | replace('_', ' ') }}: {{ g.covered_by.target }}</code>
+              (<span class="{{ 'ham' if g.covered_by.verdict == 'allow' else 'spam' }}">{{ g.covered_by.verdict }}</span>)
+              — {{ g.count }} redundant:
+              {{ g.rules[:4] | map(attribute='target') | join(', ') }}{% if g.count > 4 %} +{{ g.count - 4 }} more{% endif %}
+            </span>
+          </div>
+          <div class="optimize-actions">
+            <form method="post" action="/ui/rules/redundant/remove" class="inline"
+                  data-confirm="Remove {{ g.count }} redundant rule(s) already covered by {{ g.covered_by.target }}?"
+                  data-confirm-action="Remove">
+              {% include "_csrf.html" %}
+              <input type="hidden" name="target" value="{{ g.covered_by.target }}">
+              <input type="hidden" name="target_type" value="{{ g.covered_by.target_type }}">
+              <button type="submit" class="primary small">remove</button>
+            </form>
+            <form method="post" action="/ui/rules/redundant/dismiss" class="inline">
+              {% include "_csrf.html" %}
+              <input type="hidden" name="target" value="{{ g.covered_by.target }}">
+              <input type="hidden" name="target_type" value="{{ g.covered_by.target_type }}">
+              <button type="submit" class="small">dismiss</button>
+            </form>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
   <div class="panel" style="margin: 1.5rem 0">
     <h2 style="margin-top: 0; font-size: 1rem">Add rule</h2>
     <form method="post" action="/ui/rules/add" class="rule-form">

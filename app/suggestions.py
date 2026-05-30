@@ -86,8 +86,8 @@ async def list_rule_optimizations(
     When `threshold`+ distinct `address`/`deny` rules share the same domain
     (e.g. 1@foo.com, 2@foo.com, 3@foo.com), surface foo.com as a collapse
     candidate. Skips public/freemail/relay domains, domains that already have
-    an explicit `domain`/`allow` rule (collapsing would clobber it), and
-    domains the user has dismissed.
+    any `domain` rule (an existing deny is handled by `list_redundant_rules`;
+    an existing allow would be clobbered), and dismissed domains.
     """
     threshold = (
         threshold if threshold is not None else settings.optimize_rules_threshold
@@ -128,13 +128,102 @@ async def list_rule_optimizations(
             continue
         if domain in dismissed:
             continue
-        if domain_verdicts.get(domain) == "allow":
-            continue  # don't overwrite an intentional domain allow
+        if domain in domain_verdicts:
+            continue  # a domain rule already exists (deny → redundancy; allow → conflict)
         out.append({
             "domain": domain,
             "addresses": sorted(addrs),
             "count": len(addrs),
         })
+    out.sort(key=lambda g: g["count"], reverse=True)
+    return out
+
+
+def _most_specific_domain_rule(
+    domain: str, domain_verdicts: dict[str, str]
+) -> tuple[str, str] | None:
+    """Return (matched_domain, verdict) of the most-specific domain rule on
+    `domain`'s parent chain, mirroring lookup()'s tier-2 walk, or None."""
+    parts = domain.split(".")
+    for i in range(len(parts)):
+        d = ".".join(parts[i:])
+        if d in domain_verdicts:
+            return d, domain_verdicts[d]
+    return None
+
+
+async def list_redundant_rules(user_id: str) -> list[dict]:
+    """Group rules that are already covered by a broader, same-verdict rule.
+
+    Removing a redundant rule never changes any classification outcome — the
+    broader rule produces the same verdict. Only safe, outcome-preserving
+    cases are surfaced:
+
+      * an `address` rule whose most-specific matching `domain` rule has the
+        same verdict (the domain rule already decides it);
+      * a `domain` rule whose nearest parent `domain` rule has the same verdict.
+
+    Differing-verdict pairs (e.g. `domain` allow + `address` deny) are
+    intentional exceptions and are left untouched. Results are grouped by the
+    covering rule; dismissed groups are excluded.
+    """
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT target, target_type, verdict FROM sender_rules WHERE user_id = ?",
+            (user_id,),
+        )
+        rules = [dict(r) for r in await cur.fetchall()]
+        cur = await db.execute(
+            """SELECT target, target_type FROM suggestion_dismissals
+               WHERE user_id = ? AND suggestion_kind = 'redundant'""",
+            (user_id,),
+        )
+        dismissed = {(r["target_type"], r["target"]) for r in await cur.fetchall()}
+
+    domain_verdicts = {
+        r["target"]: r["verdict"] for r in rules if r["target_type"] == "domain"
+    }
+
+    groups: dict[tuple[str, str], dict] = {}
+    for r in rules:
+        target, ttype, verdict = r["target"], r["target_type"], r["verdict"]
+        cover: tuple[str, str, str] | None = None  # (type, target, verdict)
+
+        if ttype == "address" and "@" in target:
+            match = _most_specific_domain_rule(target.split("@", 1)[-1], domain_verdicts)
+            if match and match[1] == verdict:
+                cover = ("domain", match[0], verdict)
+        elif ttype == "domain":
+            parts = target.split(".")
+            for i in range(1, len(parts)):  # strict parents only
+                parent = ".".join(parts[i:])
+                if parent in domain_verdicts:
+                    if domain_verdicts[parent] == verdict:
+                        cover = ("domain", parent, verdict)
+                    break  # nearest parent decides; differing verdict = exception
+
+        if cover is None:
+            continue
+        ctype, ctarget, cverdict = cover
+        group = groups.setdefault(
+            (ctype, ctarget),
+            {
+                "covered_by": {
+                    "target": ctarget, "target_type": ctype, "verdict": cverdict
+                },
+                "rules": [],
+            },
+        )
+        group["rules"].append({"target": target, "target_type": ttype})
+
+    out: list[dict] = []
+    for (ctype, ctarget), group in groups.items():
+        if (ctype, ctarget) in dismissed:
+            continue
+        group["rules"].sort(key=lambda x: (x["target_type"], x["target"]))
+        group["count"] = len(group["rules"])
+        out.append(group)
     out.sort(key=lambda g: g["count"], reverse=True)
     return out
 
