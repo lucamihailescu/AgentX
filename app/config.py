@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     blocked_domains: str = ""
     suggest_block_threshold: int = 3
     suggest_max_items: int = 5
+    # "Optimize rules": when this many distinct address-level deny rules share
+    # one domain, suggest collapsing them into a single domain deny rule.
+    optimize_rules_threshold: int = 3
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AGENT_", extra="ignore")
 
