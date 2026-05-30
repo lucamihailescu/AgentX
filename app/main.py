@@ -672,12 +672,14 @@ async def ui_rules(request: Request):
     user_id = _require_user(request)
     rules = await rules_module.list_rules(user_id)
     optimizations = await suggestions.list_rule_optimizations(user_id)
+    redundancies = await suggestions.list_redundant_rules(user_id)
     return templates.TemplateResponse(
         request,
         "rules.html",
         {
             "rules": rules,
             "optimizations": optimizations,
+            "redundancies": redundancies,
             "username": request.session.get("username"),
         },
     )
@@ -747,6 +749,38 @@ async def ui_rule_optimize_dismiss(request: Request):
     domain = (form.get("domain") or "").strip().lower()
     if domain:
         await suggestions.dismiss(user_id, domain, "domain", "optimize")
+    return RedirectResponse("/ui/rules", status_code=303)
+
+
+@app.post("/ui/rules/redundant/remove")
+async def ui_rule_redundant_remove(request: Request):
+    """Remove every rule already covered by the given (same-verdict) rule.
+
+    The subsumed set is recomputed server-side from the covering rule's
+    target/type so the form can't be used to delete arbitrary rules.
+    """
+    user_id = _require_user(request)
+    form = await request.form()
+    target = (form.get("target") or "").strip().lower()
+    target_type = (form.get("target_type") or "").strip()
+    groups = await suggestions.list_redundant_rules(user_id)
+    for g in groups:
+        cb = g["covered_by"]
+        if cb["target"] == target and cb["target_type"] == target_type:
+            for r in g["rules"]:
+                await rules_module.delete_rule(user_id, r["target"], r["target_type"])
+            break
+    return RedirectResponse("/ui/rules", status_code=303)
+
+
+@app.post("/ui/rules/redundant/dismiss")
+async def ui_rule_redundant_dismiss(request: Request):
+    user_id = _require_user(request)
+    form = await request.form()
+    target = (form.get("target") or "").strip().lower()
+    target_type = (form.get("target_type") or "").strip()
+    if target and target_type:
+        await suggestions.dismiss(user_id, target, target_type, "redundant")
     return RedirectResponse("/ui/rules", status_code=303)
 
 
