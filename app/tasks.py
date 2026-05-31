@@ -6,11 +6,16 @@ import httpx
 
 from . import calibration
 from . import rspamd_client
+from .categories import category_label, needs_reply_label, phishing_label
 from .config import BLOCKED_DOMAINS, settings
 from .ollama_client import classify
 from .providers import MailboxProvider
 from .providers.base import AuthError
 from .rules import lookup as lookup_rule
+
+# Transient mailbox plumbing carried on each message dict for the
+# categorization / phishing passes, but not worth persisting on the report.
+_TRANSIENT_FIELDS = ("categories", "from_header", "auth_headers")
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +223,63 @@ async def classify_messages(
         return result
 
 
+async def apply_categories(
+    provider: type[MailboxProvider],
+    user_id: str,
+    messages: list[dict],
+) -> int:
+    """Write each classified message's category (a needs-reply marker, and a
+    phishing marker) back to the mailbox as an Outlook category / Gmail label.
+
+    Best-effort and idempotent: skips auto-deleted messages, runs
+    bounded-concurrent, and logs (never raises) per-message failures so a
+    single label write can't fail the audit. Sets `category_applied` on each
+    message it successfully labels.
+    """
+    if not settings.apply_labels_enabled:
+        return 0
+    semaphore = asyncio.Semaphore(4)
+    applied = 0
+
+    async def _one(m: dict) -> None:
+        nonlocal applied
+        if not m.get("id") or m.get("auto_deleted"):
+            return
+        labels: list[str] = []
+        # Category labels only for messages that went through the classifier
+        # (rule-short-circuited rows carry no category).
+        category = m.get("category")
+        if category and not m.get("rule_applied"):
+            labels.append(category_label(category))
+            if m.get("needs_reply"):
+                labels.append(needs_reply_label())
+        # Phishing label applies regardless of rule/spam verdict.
+        if m.get("phishing"):
+            labels.append(phishing_label())
+        if not labels:
+            return
+        async with semaphore:
+            try:
+                await provider.apply_labels(
+                    user_id,
+                    m["id"],
+                    labels,
+                    existing_categories=m.get("categories"),
+                )
+                m["category_applied"] = True
+                applied += 1
+            except Exception as exc:  # best-effort; never fail the audit
+                logger.warning(
+                    "apply_labels failed for %s (labels=%s): %s",
+                    m["id"], labels, exc,
+                )
+
+    await asyncio.gather(*(_one(m) for m in messages))
+    if applied:
+        logger.info("categorization: labeled %d message(s)", applied)
+    return applied
+
+
 async def purge_mailbox(
     provider: type[MailboxProvider],
     user_id: str,
@@ -299,11 +361,33 @@ async def generate_report(classified: list[dict]) -> dict:
         for m in classified
         if m.get("spam") is None and not m.get("auto_deleted")
     )
+
+    # Category breakdown over messages that survived to classification (not
+    # auto-deleted) and actually got a category.
+    category_counts: dict[str, int] = {}
+    needs_reply_count = 0
+    phishing_count = 0
+    for m in classified:
+        if not m.get("auto_deleted"):
+            cat = m.get("category")
+            if cat:
+                category_counts[cat] = category_counts.get(cat, 0) + 1
+            if m.get("needs_reply"):
+                needs_reply_count += 1
+            if m.get("phishing"):
+                phishing_count += 1
+        # Drop transient mailbox plumbing before persisting the report.
+        for field in _TRANSIENT_FIELDS:
+            m.pop(field, None)
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "message_count": len(classified),
         "spam_count": spam_count,
         "auto_deleted_count": auto_deleted_count,
         "unknown_count": unknown_count,
+        "category_counts": category_counts,
+        "needs_reply_count": needs_reply_count,
+        "phishing_count": phishing_count,
         "messages": classified,
     }

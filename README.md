@@ -2,7 +2,11 @@
 
 A long-running mailbox-audit agent for **consumer Microsoft (outlook.com)** and **consumer Google (gmail.com)** accounts.
 
-Each user is bound to a single provider on first sign-in. The agent persists an encrypted token cache, runs background audits against the appropriate API (Microsoft Graph for Outlook, Gmail REST API for Gmail), classifies messages locally with Ollama, applies the user's allow/deny rules, and renders results in a built-in web UI. Nothing is sent on the user's behalf — the agent only reads and trashes mail.
+Each user is bound to a single provider on first sign-in. The agent persists an encrypted token cache, runs background audits against the appropriate API (Microsoft Graph for Outlook, Gmail REST API for Gmail), classifies messages locally with Ollama, applies the user's allow/deny rules, and renders results in a built-in web UI.
+
+Beyond spam, the agent also **triages** each message into a category and files it back as an Outlook category / Gmail label, runs a deterministic **phishing/BEC review** over the headers, extracts **action items** and can save **reply drafts** to the mailbox, and maintains a **semantic search** index over everything it has audited. See [Beyond spam](#beyond-spam-triage-phishing-actions-search) below.
+
+**The agent never sends mail on the user's behalf.** Its write surface is bounded to: trashing mail, applying its own namespaced labels/categories, and saving *drafts* (which only a human can send from their real mail client).
 
 ## Why MSAL and not the Entra Agent ID SDK?
 
@@ -40,7 +44,11 @@ So this codebase drops the sidecar and goes straight to MSAL. The "long-running"
 | `app/providers/microsoft.py` | MSAL + Microsoft Graph implementation |
 | `app/providers/google.py` | OAuth 2.0 (PKCE) + Gmail REST API implementation. Hydrates message metadata via Gmail's `/batch/gmail/v1` endpoint (multipart/mixed, ≤100 sub-requests/round-trip) instead of one HTTP call per id. |
 | `app/rules.py` | Per-user `sender_rules` CRUD + lookup helper. Address rules win over domain rules. |
-| `app/tasks.py` | Pipeline: fetch via provider → auto-delete blocked → apply sender rules → classify remaining via Ollama → build report dict |
+| `app/categories.py` | Triage taxonomy (fixed 6-category set + `needs_reply`) and the mailbox-label names the worker writes back. |
+| `app/phishing.py` | Deterministic phishing/BEC heuristics over header metadata (display-name spoofing, Reply-To mismatch, SPF/DKIM/DMARC, brand impersonation). |
+| `app/drafts.py` | LLM reply-draft generation (plain text). Provider saves the result to Drafts — never sent. |
+| `app/search_index.py` | Semantic search: embeds audited messages into a dedicated ChromaDB collection and queries it by meaning. |
+| `app/tasks.py` | Pipeline: fetch via provider → auto-delete blocked → apply sender rules → classify + categorize remaining via Ollama → flag phishing → write labels back → build report dict |
 | `app/ollama_client.py` | Async client for `POST {OLLAMA_URL}/api/generate` with `format=json`; defensive parsing |
 | `app/worker.py` | Two background loops: `Worker` claims queued rows and runs the pipeline; `Scheduler` queues new audits per user on a configurable interval |
 | `app/templates/` | Jinja2 templates: `base.html`, `login.html`, `index.html`, `task.html`, `rules.html`, `senders.html`, `settings.html` |
@@ -106,12 +114,14 @@ Then in a browser: <http://localhost:8080> → "Sign in with Microsoft" → land
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe` | session / bearer | Hit the message's `List-Unsubscribe` HTTPS URL (POST if one-click, else GET); mark `unsubscribed` |
 | POST | `/ui/tasks/{id}/messages/{mid}/unsubscribe-and-delete` | session / bearer | Unsubscribe, then delete |
 | POST | `/ui/tasks/{id}/messages/{mid}/rule/{verdict}` | session / bearer | Create an `address` rule (`allow` or `deny`) for this message's sender. `deny` also deletes the message. |
+| POST | `/ui/tasks/{id}/messages/{mid}/draft` | session / bearer | Generate a reply with the LLM and save it to the mailbox's Drafts folder (never sent). Shown for `needs_reply` messages. |
 | POST | `/ui/tasks/{id}/bulk/{action}` | session / bearer | Bulk variant — `action` ∈ `delete` \| `unsubscribe` \| `unsubscribe-and-delete` \| `allow` \| `deny`. Body is form-encoded `messages=<id>` repeated per selection. Per-message failures log warnings and don't fail the rest. |
 | POST | `/ui/tasks/{id}/next` | session / bearer | Creates a new audit whose `cursor_before` is set to the oldest message of this audit — i.e. "next page" of older mail. Redirects to the new audit. |
 | GET | `/ui/rules` | session | Manage sender allow/deny rules. |
 | POST | `/ui/rules/add` | session | Form action: add an address or domain rule. |
 | POST | `/ui/rules/delete` | session | Form action: remove a rule. |
 | GET | `/ui/senders` | session | Aggregated stats per sender / domain across every audit, with one-click allow/block. |
+| GET | `/ui/search` | session | Semantic search over every audited message (`?q=`), with deep-links back to the source audit. |
 | GET | `/ui/settings` | session | View / change scheduled-audit interval. |
 | POST | `/ui/settings` | session | Save scheduled-audit interval. |
 | GET | `/ui/chat` | session | Conversational interface to the agent (mem0-backed). |
@@ -264,6 +274,42 @@ Body-link parsing ("find the *Unsubscribe* word in the HTML") is **not** impleme
 - An Ollama instance reachable from the agent container. On macOS / Windows Docker Desktop, the default `http://host.docker.internal:11434` works for an Ollama that's installed on your machine. On Linux, set `OLLAMA_URL` to the host IP, or run Ollama as a container on the same Docker network.
 - Pull the model before queueing a task: `ollama pull llama3.2` (or whatever you set `OLLAMA_MODEL` to).
 
+## Beyond spam: triage, phishing, actions, search
+
+Spam classification is one verdict on top of a general mailbox-agent foundation (OAuth + local LLM + rules + scheduler + a vector store). Four capabilities build on that foundation:
+
+### 1. Triage & auto-foldering
+
+The same per-message Ollama call that decides `spam` now also returns a **category** and a **`needs_reply`** flag — no extra LLM round-trip. Categories are a fixed set (`Personal`, `Finance/Receipts`, `Travel`, `Newsletter/Promotions`, `Notifications/Updates`, `Other`); the model's free-form answer is normalized to that set in `app/categories.py`.
+
+After classification the worker **writes the category back to the real mailbox** as a namespaced label — an Outlook **category** (`AGENT_LABEL_PREFIX/Finance`) or a Gmail **label** (auto-created, nested under the prefix). A `needs_reply` message also gets an `AgentX/Needs Reply` label. Write-back is idempotent and best-effort: a failed label write logs a warning and never fails the audit. The task page shows a per-row category chip, a category breakdown, and category/needs-reply filter chips.
+
+- Disable categorization with `AGENT_CATEGORIZE_ENABLED=false` (reverts the classifier to its spam-only prompt).
+- Classify-and-display **without** touching the mailbox via `AGENT_APPLY_LABELS_ENABLED=false`.
+- Outlook write-back merges with the message's existing categories (captured at fetch time) so it never clobbers categories you set yourself.
+
+### 2. Phishing / BEC review
+
+`app/phishing.py` runs a fast, deterministic pass over header metadata the providers already fetch (`From`, `Reply-To`, `Authentication-Results`, `Received-SPF`). It is **independent of the spam verdict** — a spammy newsletter is honest; a low-volume mail spoofing your bank is not. Weighted signals:
+
+- **Display-name deception** — the display name embeds a different address/domain than the real sender, or names a brand (`paypal`, `apple`, `microsoft`, your bank, …) whose domain isn't the actual sender.
+- **Reply-To redirect** — `Reply-To` points to a different organization (classic BEC).
+- **Authentication failure** — `dmarc=fail` (strong), or SPF/DKIM failures when DMARC isn't passing (a DMARC pass suppresses the noisier signals to avoid flagging forwarded/ESP mail).
+
+When the weighted score clears the threshold the message is flagged `phishing` (sub-threshold matches show as a weaker "suspect" badge), the **reasons are shown inline**, an `AgentX/Phishing` label is applied, and the daily digest gets a dedicated "Possible phishing" section. Phishing is checked even for allow-listed senders — a spoofed message *claiming* to be a trusted contact is exactly the case a sender allow-rule would otherwise wave through. Toggle with `AGENT_PHISHING_ENABLED`.
+
+### 3. Action items & draft replies
+
+When triage is on, the classifier also extracts a one-line **`action`** and an optional **`due`** date from messages that request something (reply/pay/confirm/review). These surface on the task page and in a digest **"Action items"** section. Toggle with `AGENT_EXTRACT_ACTIONS_ENABLED`.
+
+For `needs_reply` messages a **✎ Draft** button generates a reply with the local LLM (`app/drafts.py`) and **saves it to the mailbox's Drafts folder** — Graph `createReply` (threaded + quoted) for Outlook, a threaded `drafts.create` for Gmail. The agent **never sends** it; you review and send from your own mail client. The generated text is shown inline once saved. Toggle with `AGENT_DRAFTS_ENABLED`; pick the model with `AGENT_DRAFT_MODEL` (falls back to the chat model, then the classifier model).
+
+### 4. Semantic mailbox search
+
+`/ui/search` is meaning-based search over every message the agent has audited — "receipt from the plumber", "flight to Lisbon" — rather than keyword match. `app/search_index.py` embeds each audited message's sender/subject/preview with the same Ollama embed model the chat layer uses and upserts it into a **dedicated ChromaDB collection** (`agentx_messages`, separate from mem0's memory store). Indexing runs after each audit, best-effort. Results deep-link back to the source audit row. The chat assistant gets a matching **`search_inbox`** tool. Toggle with `AGENT_SEARCH_ENABLED`; if Chroma or the embed model is unavailable, indexing and search both no-op and the rest of the app is unaffected.
+
+> **Prompt sizing note.** Categorization + action extraction + few-shot examples make the classifier prompt larger. If you enable everything *and* raise `AGENT_OLLAMA_EXAMPLES_PER_CLASS`, consider bumping `AGENT_OLLAMA_NUM_CTX` (default `1024`) so the few-shot block isn't silently truncated.
+
 ## Configuration
 
 All settings are read from environment variables prefixed with `AGENT_` (and from `.env`).
@@ -295,6 +341,16 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_SUGGEST_MAX_ITEMS` | `5` | Max suggestions surfaced at once. |
 | `AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES` | *(empty)* | Fallback scheduler interval, in minutes. Used when a user hasn't set their own on `/ui/settings`. Per-user value always wins. |
 | `AGENT_SCHEDULER_TICK_SECONDS` | `60` | How often the scheduler wakes to check whether any user is due. |
+| `AGENT_CATEGORIZE_ENABLED` | `true` | Ask the classifier to also return a category + `needs_reply` (same LLM call). |
+| `AGENT_APPLY_LABELS_ENABLED` | `true` | Write categories/markers back to the mailbox as Outlook categories / Gmail labels. |
+| `AGENT_LABEL_PREFIX` | `AgentX` | Namespace for every label the agent applies (e.g. `AgentX/Finance`, `AgentX/Phishing`). |
+| `AGENT_PHISHING_ENABLED` | `true` | Run the deterministic phishing/BEC header heuristics. |
+| `AGENT_EXTRACT_ACTIONS_ENABLED` | `true` | Pull a one-line `action` + optional `due` date out of messages that request something. |
+| `AGENT_DRAFTS_ENABLED` | `true` | Allow on-demand reply-draft generation (saved to Drafts, never sent). |
+| `AGENT_DRAFT_MODEL` | *(falls back to chat → classifier model)* | Ollama model used to write reply drafts. |
+| `AGENT_DRAFT_NUM_PREDICT` | `400` | Output-token cap for a generated draft. |
+| `AGENT_SEARCH_ENABLED` | `true` | Index audited messages into ChromaDB and enable `/ui/search` + the `search_inbox` chat tool. |
+| `AGENT_SEARCH_TOP_K` | `20` | Max results returned by a semantic search. |
 
 ## Sender rules (allowlist / denylist)
 
@@ -359,6 +415,7 @@ The chat agent has four tools wired in. Ask it to *do* something and it'll execu
 | `run_cleanup` | Queues a purge (entire mailbox, blocklist + deny rules only — no Ollama). | *"Clean up everything that matches my rules."* |
 | `next_page` | Queues a follow-up audit older than a given parent audit. | *"Get the next page of [audit:a7e24585-…]."* |
 | `add_rule` | Adds an `address` / `domain` / `address_contains` / `subject_contains` rule with `allow` or `deny`. | *"Always block any email subject containing 'MealPal'."* |
+| `search_inbox` | Semantic search over audited mail by meaning, not keywords. | *"Find the receipt from the plumber in March."* |
 
 Per turn, the agent loops up to 5 times (LLM → tool calls → tool results → LLM →…). The chat UI streams a *progress feed* during the loop:
 ```

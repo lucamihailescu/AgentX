@@ -29,6 +29,8 @@ _BORDERLINE_LOW = 0.40
 _BORDERLINE_HIGH = 0.75
 _NEEDS_EYE_CAP = 30
 _TOP_SENDERS_CAP = 5
+_ACTION_ITEMS_CAP = 30
+_PHISHING_CAP = 30
 
 
 def _is_borderline(m: dict) -> bool:
@@ -82,10 +84,14 @@ async def generate_digest(user_id: str, window_hours: int) -> dict:
         "user_deleted": 0,        # manual deletes recorded against audit rows
         "user_unsubscribed": 0,   # manual unsubs against audit rows
         "purge_deleted": 0,       # cleanup-pass deletions
+        "phishing_flagged": 0,    # phishing/BEC heuristics flagged
+        "needs_reply": 0,         # messages the model thinks want a reply
     }
     sender_spam: dict[str, int] = {}
     needs_eye: list[dict] = []
     seen_eye_senders: set[str] = set()
+    action_items: list[dict] = []
+    phishing: list[dict] = []
 
     for row in task_rows:
         if not row["result_data"]:
@@ -114,6 +120,40 @@ async def generate_digest(user_id: str, window_hours: int) -> dict:
                 counts["user_deleted"] += 1
             if m.get("unsubscribed"):
                 counts["user_unsubscribed"] += 1
+            if m.get("needs_reply"):
+                counts["needs_reply"] += 1
+
+            # Action items: a requested action and/or a needs-reply message
+            # still sitting in the inbox (not deleted / unsubscribed).
+            if (
+                (m.get("action") or m.get("needs_reply"))
+                and not m.get("deleted")
+                and not m.get("auto_deleted")
+                and not m.get("unsubscribed")
+                and len(action_items) < _ACTION_ITEMS_CAP
+            ):
+                action_items.append({
+                    "audit_task_id": row["task_id"],
+                    "message_id": m.get("id"),
+                    "from": m.get("from"),
+                    "subject": m.get("subject"),
+                    "action": m.get("action"),
+                    "due": m.get("due"),
+                    "needs_reply": bool(m.get("needs_reply")),
+                    "received": m.get("received"),
+                })
+
+            if m.get("phishing"):
+                counts["phishing_flagged"] += 1
+                if len(phishing) < _PHISHING_CAP:
+                    phishing.append({
+                        "audit_task_id": row["task_id"],
+                        "message_id": m.get("id"),
+                        "from": m.get("from"),
+                        "subject": m.get("subject"),
+                        "received": m.get("received"),
+                        "phishing_reasons": m.get("phishing_reasons") or [],
+                    })
 
             if (
                 _is_borderline(m)
@@ -149,4 +189,6 @@ async def generate_digest(user_id: str, window_hours: int) -> dict:
         ],
         "new_rules": new_rules,
         "needs_eye": needs_eye,
+        "action_items": action_items,
+        "phishing": phishing,
     }

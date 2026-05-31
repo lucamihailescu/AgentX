@@ -26,8 +26,10 @@ from .config import settings
 from .csrf import CSRFMiddleware
 from .db import init_db
 from . import chat as chat_module
+from . import drafts as drafts_module
 from . import rspamd_client
 from . import rules as rules_module
+from . import search_index
 from . import sender_stats
 from . import suggestions
 from .providers import PROVIDERS, get_provider
@@ -370,6 +372,7 @@ async def ui_task_detail(task_id: str, request: Request):
             "task": task,
             "raw_json": raw_json,
             "has_actionable": has_actionable,
+            "drafts_enabled": settings.drafts_enabled,
             "username": request.session.get("username"),
         },
     )
@@ -667,6 +670,27 @@ async def ui_senders(request: Request):
     )
 
 
+@app.get("/ui/search", response_class=HTMLResponse)
+async def ui_search(request: Request):
+    user_id = _require_user(request)
+    query = (request.query_params.get("q") or "").strip()
+    results: list[dict] = []
+    if query and settings.search_enabled:
+        results = await search_index.search(
+            user_id, query, limit=settings.search_top_k
+        )
+    return templates.TemplateResponse(
+        request,
+        "search.html",
+        {
+            "query": query,
+            "results": results,
+            "search_enabled": settings.search_enabled,
+            "username": request.session.get("username"),
+        },
+    )
+
+
 @app.get("/ui/rules", response_class=HTMLResponse)
 async def ui_rules(request: Request):
     user_id = _require_user(request)
@@ -814,6 +838,50 @@ async def ui_unsubscribe_and_delete(task_id: str, message_id: str, request: Requ
         user_id, target.get("from"), deleted=1, unsubscribed=bumped_unsub
     )
     rspamd_client.fire_learn(target, user_id, "spam")
+    return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+
+
+@app.post("/ui/tasks/{task_id}/messages/{message_id}/draft")
+async def ui_draft_reply(task_id: str, message_id: str, request: Request):
+    """Generate a reply draft for a message and save it to the mailbox's
+    Drafts folder. Never sends — the user reviews + sends manually."""
+    if not settings.drafts_enabled:
+        raise HTTPException(status_code=404, detail="Drafts are disabled")
+    user_id = _require_user(request)
+    task = await _load_task(user_id, task_id)
+    target = _find_message(task, message_id)
+    to = (target.get("from") or "").strip()
+    if not to:
+        raise HTTPException(status_code=400, detail="Message has no sender to reply to")
+    provider = await _user_provider(user_id)
+    try:
+        body = await provider.fetch_message_body(user_id, message_id)
+    except AuthError as exc:
+        raise HTTPException(status_code=502, detail=f"Body fetch failed: {exc}")
+    subject = target.get("subject") or ""
+    reply_subject = subject if subject[:3].lower() == "re:" else f"Re: {subject}"
+    try:
+        text = await drafts_module.generate_reply(
+            subject=subject,
+            from_addr=to,
+            html=body.get("html"),
+            text=body.get("text"),
+        )
+    except drafts_module.DraftError as exc:
+        raise HTTPException(status_code=502, detail=f"Draft generation failed: {exc}")
+    try:
+        await provider.create_draft(
+            user_id,
+            to=to,
+            subject=reply_subject,
+            body=text,
+            in_reply_to_id=message_id,
+        )
+    except AuthError as exc:
+        raise HTTPException(status_code=502, detail=f"Draft save failed: {exc}")
+    target["draft_created"] = True
+    target["draft_text"] = text
+    await _save_result(task_id, task["result"])
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 

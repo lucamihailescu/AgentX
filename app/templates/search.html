@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}agentx — search{% endblock %}
+{% block body %}
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">semantic</div>
+      <h1>Search <em>mailbox</em>.</h1>
+    </div>
+  </div>
+
+  <p class="meta" style="max-width: 64ch">
+    Meaning-based search over every message the agent has audited — ask in
+    plain language ("receipt from the plumber", "flight to Lisbon") rather than
+    exact keywords. Results deep-link back to the audit they came from.
+  </p>
+
+  <form action="/ui/search" method="get" class="search-form">
+    <input type="search" name="q" value="{{ query | e }}" autofocus
+           placeholder="describe what you're looking for…" autocomplete="off">
+    <button type="submit" class="primary">Search</button>
+  </form>
+
+  {% if query %}
+    {% if results %}
+      <p class="meta" style="margin: .25rem 0 1rem">
+        <span class="eyebrow inline">{{ results | length }} result{% if results | length != 1 %}s{% endif %}</span>
+        for <code>{{ query }}</code>
+      </p>
+      <div class="panel flush">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 220px">from</th>
+              <th>subject</th>
+              <th style="width: 90px">category</th>
+              <th style="width: 70px">match</th>
+              <th style="width: 150px">received</th>
+              <th style="width: 70px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in results %}
+              <tr>
+                <td><code class="from">{{ r.from or '—' }}</code></td>
+                <td>
+                  <div class="subject-line">{{ r.subject or '(no subject)' }}</div>
+                  {% if r.spam %}<span class="pill spam" style="margin-top:.3rem">spam</span>{% endif %}
+                </td>
+                <td>
+                  {% if r.category %}<span class="cat-chip sm">{{ r.category }}</span>{% endif %}
+                </td>
+                <td class="meta mono" style="font-size:.78rem; color: var(--accent)">
+                  {% if r.score is not none %}{{ '%.0f'|format(r.score * 100) }}%{% endif %}
+                </td>
+                <td class="meta received">{{ r.received or '' }}</td>
+                <td class="row-rules">
+                  {% if r.audit_task_id and r.message_id %}
+                    <a class="small button"
+                       href="/ui/tasks/{{ r.audit_task_id }}#row-{{ r.message_id }}"
+                       title="Open in source audit">open ↗</a>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="panel">
+        <div class="empty">
+          {% if not search_enabled %}
+            Search is disabled.
+          {% else %}
+            No matches — try different wording, or run an audit first so there's
+            mail to search.
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+  {% endif %}
+
+  <style>
+    .search-form {
+      display: flex;
+      gap: .5rem;
+      margin: 1.25rem 0 1rem;
+    }
+    .search-form input[type="search"] {
+      flex: 1;
+      padding: .6rem .85rem;
+      border-radius: var(--radius);
+      border: 1px solid var(--border-strong);
+      background: var(--surface);
+      color: var(--text);
+      font: inherit;
+      font-size: .9rem;
+    }
+    .search-form input[type="search"]:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-tint);
+    }
+    .from { font-size: .78rem; color: var(--text-muted); word-break: break-all; }
+    .subject-line { font-weight: 500; line-height: 1.4; }
+    .received { font-family: var(--mono); font-size: .73rem; white-space: nowrap; color: var(--text-faint); }
+    .row-rules { white-space: nowrap; text-align: right; }
+    a.small.button {
+      display: inline-block;
+      font-size: .68rem;
+      padding: .26rem .55rem;
+      line-height: 1;
+      border-radius: 3px;
+      letter-spacing: 0;
+    }
+    .cat-chip.sm {
+      display: inline-flex;
+      font-family: var(--mono);
+      font-size: .62rem;
+      padding: .12rem .45rem;
+      border: 1px solid var(--border-strong);
+      border-radius: 99px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+  </style>
+{% endblock %}

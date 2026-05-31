@@ -49,6 +49,40 @@ class Settings(BaseSettings):
     # the model's verdict. Disable to make Ollama's call authoritative.
     calibration_enabled: bool = True
 
+    # ── Triage / categorization ──────────────────────────────────────────
+    # Ask the classifier to also bucket each message into a fixed category
+    # (see app/categories.py) and flag whether it wants a human reply.
+    categorize_enabled: bool = True
+    # Write the resulting category back to the real mailbox as an Outlook
+    # category / Gmail label. Disable to classify-and-display only (no
+    # mailbox writes).
+    apply_labels_enabled: bool = True
+    # Prefix for every label the agent applies, so its labels are namespaced
+    # and easy to find/remove (e.g. "AgentX/Finance", "AgentX/Needs Reply").
+    label_prefix: str = "AgentX"
+
+    # ── Phishing / BEC review ────────────────────────────────────────────
+    # Deterministic header heuristics (display-name spoofing, Reply-To
+    # mismatch, SPF/DKIM/DMARC failures, brand impersonation) surfaced as a
+    # verdict separate from spam. See app/phishing.py.
+    phishing_enabled: bool = True
+
+    # ── Action layer (extraction + draft replies) ───────────────────────
+    # Ask the classifier to also pull a one-line action + optional due date
+    # out of messages that request something. Surfaced in the report + digest.
+    extract_actions_enabled: bool = True
+    # Generate reply drafts (saved to the mailbox, never sent) on demand.
+    drafts_enabled: bool = True
+    # Model for draft generation; falls back to chat_model, then ollama_model.
+    draft_model: str | None = None
+    draft_num_predict: int = 400
+
+    # ── Semantic mailbox search ──────────────────────────────────────────
+    # Index audited messages into a Chroma collection (reusing the embed
+    # model + chroma_path the chat layer already uses) for semantic recall.
+    search_enabled: bool = True
+    search_top_k: int = 20
+
     # ── Rspamd second-opinion classifier ─────────────────────────────────
     # When set, every message classified by Ollama is also checked against
     # Rspamd and the two verdicts are blended (plus the per-sender prior).

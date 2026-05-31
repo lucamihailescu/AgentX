@@ -34,6 +34,16 @@ class Message:
     preview: str | None
     unsubscribe_url: str | None = None
     unsubscribe_one_click: bool = False
+    # Existing mailbox categories/labels at fetch time. Used by the
+    # categorization write-back to merge (rather than clobber) Outlook
+    # categories; left None by providers that don't surface them.
+    categories: list[str] | None = None
+    # Raw From: header value (display name + address). Populated when the
+    # provider can cheaply surface it — feeds the phishing/BEC heuristics.
+    from_header: str | None = None
+    # Selected raw headers (lowercased name → value) used by the phishing
+    # heuristics: reply-to, authentication-results, return-path, etc.
+    auth_headers: dict[str, str] | None = None
 
     def to_dict(self) -> dict:
         """Convert to the dict shape the pipeline / templates expect.
@@ -47,6 +57,9 @@ class Message:
             "preview": self.preview,
             "unsubscribe_url": self.unsubscribe_url,
             "unsubscribe_one_click": self.unsubscribe_one_click,
+            "categories": self.categories,
+            "from_header": self.from_header,
+            "auth_headers": self.auth_headers,
         }
 
 
@@ -185,6 +198,42 @@ class MailboxProvider:
     @classmethod
     async def delete_message(cls, user_id: str, message_id: str) -> None:
         """Soft-delete (Trash / Deleted Items)."""
+        raise NotImplementedError
+
+    @classmethod
+    async def apply_labels(
+        cls,
+        user_id: str,
+        message_id: str,
+        add_labels: list[str],
+        *,
+        existing_categories: list[str] | None = None,
+    ) -> None:
+        """Ensure `add_labels` (human-readable names) are present on a message.
+
+        Additive and idempotent — re-applying a label a message already has is
+        a no-op. `existing_categories` lets providers whose label API replaces
+        the whole set (Outlook) merge instead of clobber, without an extra GET.
+        Providers whose API is natively additive (Gmail) ignore it.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    async def create_draft(
+        cls,
+        user_id: str,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        in_reply_to_id: str | None = None,
+    ) -> str:
+        """Save a reply draft in the mailbox (never sent). Returns the draft id.
+
+        `in_reply_to_id` threads the draft onto an existing conversation when
+        the provider supports it. The agent only ever *drafts* — sending stays
+        a manual, human action in the user's real mail client.
+        """
         raise NotImplementedError
 
     @classmethod

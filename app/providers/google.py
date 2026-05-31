@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from email.parser import BytesParser
 from email.policy import default as default_policy
 from email.utils import parseaddr, parsedate_to_datetime
@@ -39,6 +41,15 @@ _METADATA_HEADERS = (
     "Date",
     "List-Unsubscribe",
     "List-Unsubscribe-Post",
+    "Reply-To",
+    "Return-Path",
+    "Authentication-Results",
+    "Received-SPF",
+)
+
+# Subset of the above the phishing heuristics consume (lowercased).
+_AUTH_HEADER_NAMES = frozenset(
+    {"reply-to", "return-path", "authentication-results", "received-spf"}
 )
 
 
@@ -165,6 +176,11 @@ def _message_from_metadata(mid: str, data: dict) -> Message:
     unsub = find_unsubscribe(
         [{"name": h["name"], "value": h.get("value", "")} for h in payload_headers]
     )
+    auth_headers = {
+        name: by_name[name]
+        for name in _AUTH_HEADER_NAMES
+        if by_name.get(name)
+    } or None
     return Message(
         id=mid,
         subject=by_name.get("subject"),
@@ -173,6 +189,8 @@ def _message_from_metadata(mid: str, data: dict) -> Message:
         preview=data.get("snippet"),
         unsubscribe_url=unsub["url"] if unsub else None,
         unsubscribe_one_click=unsub["one_click"] if unsub else False,
+        from_header=from_raw or None,
+        auth_headers=auth_headers,
     )
 
 
@@ -209,6 +227,11 @@ def _find_part_body(payload: dict, mime_type: str) -> str | None:
 class GoogleProvider(MailboxProvider):
     NAME: ClassVar[str] = "google"
     DISPLAY_NAME: ClassVar[str] = "Google (Gmail)"
+
+    # Per-user {label_name: label_id} cache. Gmail's modify API takes label
+    # IDs, not names, so we resolve (and lazily create) them once per process.
+    _label_cache: ClassVar[dict[str, dict[str, str]]] = {}
+    _label_lock: ClassVar[asyncio.Lock | None] = None
 
     @classmethod
     def is_configured(cls) -> bool:
@@ -490,6 +513,156 @@ class GoogleProvider(MailboxProvider):
             raise AuthError(
                 f"Gmail trash returned {resp.status_code}: {resp.text[:200]}"
             )
+
+    # ── labels ────────────────────────────────────────────────────────────
+    @classmethod
+    def _get_label_lock(cls) -> asyncio.Lock:
+        if cls._label_lock is None:
+            cls._label_lock = asyncio.Lock()
+        return cls._label_lock
+
+    @classmethod
+    async def _load_labels(cls, token: str) -> dict[str, str]:
+        resp = await cls.request_with_retry(
+            "GET",
+            f"{_GMAIL_BASE}/users/me/labels",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Gmail labels.list returned {resp.status_code}: {resp.text[:200]}"
+            )
+        return {
+            lab["name"]: lab["id"]
+            for lab in (resp.json() or {}).get("labels", [])
+            if lab.get("name") and lab.get("id")
+        }
+
+    @classmethod
+    async def _create_label(cls, token: str, name: str) -> str:
+        resp = await cls.request_with_retry(
+            "POST",
+            f"{_GMAIL_BASE}/users/me/labels",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": name,
+                "labelListVisibility": "labelShow",
+                "messageListVisibility": "show",
+            },
+        )
+        if resp.status_code == 409:
+            # Raced another create (or it pre-existed) — re-list and use it.
+            labels = await cls._load_labels(token)
+            if name in labels:
+                return labels[name]
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Gmail labels.create returned {resp.status_code}: {resp.text[:200]}"
+            )
+        return (resp.json() or {})["id"]
+
+    @classmethod
+    async def _resolve_label_ids(
+        cls, user_id: str, token: str, names: list[str]
+    ) -> list[str]:
+        """Return label IDs for `names`, creating any that don't yet exist.
+        Serialized per process so concurrent audits don't double-create."""
+        async with cls._get_label_lock():
+            cache = cls._label_cache.get(user_id)
+            if cache is None or any(n not in cache for n in names):
+                cache = await cls._load_labels(token)
+                cls._label_cache[user_id] = cache
+            for name in names:
+                if name not in cache:
+                    cache[name] = await cls._create_label(token, name)
+            return [cache[n] for n in names]
+
+    @classmethod
+    async def apply_labels(
+        cls,
+        user_id: str,
+        message_id: str,
+        add_labels: list[str],
+        *,
+        existing_categories: list[str] | None = None,
+    ) -> None:
+        """Add Gmail labels (by name) to a message. Gmail's modify API is
+        natively additive + idempotent, so `existing_categories` is unused."""
+        if not add_labels:
+            return
+        token = await cls.acquire_access_token(user_id)
+        label_ids = await cls._resolve_label_ids(user_id, token, add_labels)
+        resp = await cls.request_with_retry(
+            "POST",
+            f"{_GMAIL_BASE}/users/me/messages/{message_id}/modify",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"addLabelIds": label_ids},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Gmail messages.modify returned {resp.status_code}: {resp.text[:200]}"
+            )
+
+    @classmethod
+    async def create_draft(
+        cls,
+        user_id: str,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        in_reply_to_id: str | None = None,
+    ) -> str:
+        """Save a reply draft via Gmail's drafts.create. When `in_reply_to_id`
+        is given, look up the original's threadId + Message-ID so the draft
+        threads correctly (In-Reply-To / References + threadId). Never sent."""
+        token = await cls.acquire_access_token(user_id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        thread_id: str | None = None
+        if in_reply_to_id:
+            resp = await cls.request_with_retry(
+                "GET",
+                f"{_GMAIL_BASE}/users/me/messages/{in_reply_to_id}",
+                headers=headers,
+                params={"format": "metadata", "metadataHeaders": "Message-ID"},
+            )
+            if resp.status_code < 400:
+                data = resp.json() or {}
+                thread_id = data.get("threadId")
+                orig_headers = {
+                    (h.get("name") or "").lower(): h.get("value", "")
+                    for h in (data.get("payload") or {}).get("headers", [])
+                }
+                msgid = orig_headers.get("message-id")
+            else:
+                msgid = None
+        else:
+            msgid = None
+
+        mime = EmailMessage()
+        mime["To"] = to
+        mime["Subject"] = subject
+        if msgid:
+            mime["In-Reply-To"] = msgid
+            mime["References"] = msgid
+        mime.set_content(body)
+        raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+
+        draft_msg: dict = {"raw": raw}
+        if thread_id:
+            draft_msg["threadId"] = thread_id
+        resp = await cls.request_with_retry(
+            "POST",
+            f"{_GMAIL_BASE}/users/me/drafts",
+            headers=headers,
+            json={"message": draft_msg},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Gmail drafts.create returned {resp.status_code}: {resp.text[:200]}"
+            )
+        return (resp.json() or {}).get("id") or ""
 
     @classmethod
     async def fetch_raw(cls, user_id: str, message_id: str) -> bytes:

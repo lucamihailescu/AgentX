@@ -24,6 +24,7 @@ import aiosqlite
 import httpx
 
 from . import rules as rules_module
+from . import search_index
 from . import sender_stats
 from .config import settings
 
@@ -335,6 +336,28 @@ _TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "search_inbox",
+            "description": (
+                "Semantically search the user's audited mail by meaning, not "
+                "keywords (e.g. 'receipt from the plumber', 'flight to "
+                "Lisbon'). Returns the top matching messages with their sender, "
+                "subject, and the audit they came from."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language description of what to find.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "add_rule",
             "description": (
                 "Add a per-user sender rule. Verdict 'deny' auto-deletes "
@@ -446,11 +469,33 @@ async def _tool_add_rule(user_id: str, args: dict) -> dict:
     }
 
 
+async def _tool_search_inbox(user_id: str, args: dict) -> dict:
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"ok": False, "error": "query is required"}
+    hits = await search_index.search(user_id, query, limit=8)
+    return {
+        "ok": True,
+        "count": len(hits),
+        "results": [
+            {
+                "from": h.get("from"),
+                "subject": h.get("subject"),
+                "received": h.get("received"),
+                "audit_task_id": h.get("audit_task_id"),
+                "score": h.get("score"),
+            }
+            for h in hits
+        ],
+    }
+
+
 _TOOL_DISPATCH = {
     "start_audit": _tool_start_audit,
     "run_cleanup": _tool_run_cleanup,
     "next_page": _tool_next_page,
     "add_rule": _tool_add_rule,
+    "search_inbox": _tool_search_inbox,
 }
 
 
