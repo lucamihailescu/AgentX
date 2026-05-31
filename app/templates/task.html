@@ -641,6 +641,10 @@
     .subject-line {
       font-weight: 500;
       line-height: 1.4;
+      /* Break long unbreakable strings (URLs/tokens) so one wide subject can't
+         stretch the whole auto-layout table. `anywhere` (unlike break-word)
+         also shrinks the cell's min-content width so the column can collapse. */
+      overflow-wrap: anywhere;
     }
     td.subject.expandable { cursor: pointer; }
     td.subject .chevron {
@@ -673,6 +677,7 @@
       color: var(--text-muted);
       margin-top: .3rem;
       font-variation-settings: "opsz" 60;
+      overflow-wrap: anywhere;
     }
 
     /* ───────── triage: categories + needs-reply ───────── */
@@ -755,6 +760,7 @@
       font-size: .7rem;
       line-height: 1.4;
       color: var(--spam);
+      overflow-wrap: anywhere;
     }
 
     /* ───────── action items + drafts ───────── */
@@ -762,6 +768,7 @@
       margin-top: .35rem;
       font-size: .8rem;
       color: var(--text);
+      overflow-wrap: anywhere;
     }
     .action-item .due {
       font-family: var(--mono);
@@ -793,6 +800,7 @@
       margin-top: .4rem;
       padding: .65rem .8rem;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
       font-family: var(--sans);
       font-size: .82rem;
       line-height: 1.5;
