@@ -143,7 +143,14 @@ class Settings(BaseSettings):
     # one domain, suggest collapsing them into a single domain deny rule.
     optimize_rules_threshold: int = 3
 
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="AGENT_", extra="ignore")
+    # env_ignore_empty: treat an empty-string env var as "unset" so it falls
+    # back to the field default. docker-compose's `${VAR:-}` idiom injects
+    # empty strings for unset vars, which would otherwise fail to parse for
+    # Optional[int] fields (e.g. AGENT_DEFAULT_POLL_INTERVAL_SECONDS=).
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="AGENT_", extra="ignore",
+        env_ignore_empty=True,
+    )
 
 
 settings = Settings()
