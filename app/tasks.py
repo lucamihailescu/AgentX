@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import httpx
 
 from . import calibration
+from . import phishing
 from . import rspamd_client
 from .categories import category_label, needs_reply_label, phishing_label
 from .config import BLOCKED_DOMAINS, settings
@@ -351,6 +352,63 @@ async def purge_mailbox(
     if on_progress is not None:
         await on_progress(summary)
     return summary
+
+
+async def run_pipeline(
+    provider: type[MailboxProvider],
+    user_id: str,
+    messages: list[dict],
+    *,
+    rules: dict[tuple[str, str], str],
+    examples: tuple[list[dict], list[dict]],
+    priors: dict[str, dict],
+) -> dict:
+    """The full per-message treatment shared by scheduled audits and
+    real-time scans: auto-delete blocked senders, classify (+ categorize +
+    extract actions), flag phishing, write category/phishing labels back, and
+    build the report dict. Callers supply the already-loaded rules / few-shot
+    examples / priors so they're fetched once per run."""
+    messages = await auto_delete(provider, user_id, messages, rules)
+    classified = await classify_messages(
+        messages,
+        rules,
+        examples=examples,
+        priors=priors,
+        user_id=user_id,
+        provider=provider,
+    )
+    # Flag phishing/BEC from header metadata (must run before generate_report
+    # strips the raw headers it reads).
+    phishing.flag_messages(classified)
+    # Write categories + phishing marker back to the mailbox before building
+    # the report, which also strips the transient label plumbing.
+    await apply_categories(provider, user_id, classified)
+    return await generate_report(classified)
+
+
+async def fetch_new_messages(
+    provider: type[MailboxProvider],
+    user_id: str,
+    *,
+    cursor: str | None,
+    limit: int,
+) -> tuple[list[dict], str | None]:
+    """Poll for newly-arrived mail. Fetch the newest `limit` headers and return
+    ``(new_messages, new_cursor)``.
+
+    `cursor` is an ISO received-timestamp watermark; only messages strictly
+    newer are returned. `new_cursor` is the newest received seen this poll.
+    When `cursor` is None this is a *baseline* call — returns ``([], newest)``
+    so only mail arriving AFTER polling was enabled gets scanned (no backfill
+    storm on first enable).
+    """
+    recent = await fetch_messages(provider, user_id, limit=limit)
+    receiveds = [m["received"] for m in recent if m.get("received")]
+    newest = max(receiveds) if receiveds else cursor
+    if cursor is None:
+        return [], newest
+    new = [m for m in recent if m.get("received") and m["received"] > cursor]
+    return new, (newest or cursor)
 
 
 async def generate_report(classified: list[dict]) -> dict:

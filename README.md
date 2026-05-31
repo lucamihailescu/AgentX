@@ -50,7 +50,7 @@ So this codebase drops the sidecar and goes straight to MSAL. The "long-running"
 | `app/search_index.py` | Semantic search: embeds audited messages into a dedicated ChromaDB collection and queries it by meaning. |
 | `app/tasks.py` | Pipeline: fetch via provider → auto-delete blocked → apply sender rules → classify + categorize remaining via Ollama → flag phishing → write labels back → build report dict |
 | `app/ollama_client.py` | Async client for `POST {OLLAMA_URL}/api/generate` with `format=json`; defensive parsing |
-| `app/worker.py` | Two background loops: `Worker` claims queued rows and runs the pipeline; `Scheduler` queues new audits per user on a configurable interval |
+| `app/worker.py` | Three background loops: `Worker` claims queued rows and runs the pipeline; `Scheduler` queues audits + daily digests per user on a configurable interval; `Poller` watches each user's inbox and queues real-time `scan` tasks for newly-arrived mail |
 | `app/templates/` | Jinja2 templates: `base.html`, `login.html`, `index.html`, `task.html`, `rules.html`, `senders.html`, `settings.html` |
 | `app/sender_stats.py` | Per-user / per-domain aggregate counters (precomputed by the worker; bumped on user actions) — backs `/ui/senders` with a single indexed SELECT instead of scanning every audit's JSON. |
 | `app/chat.py` | mem0-backed chat assistant. Ollama for chat LLM + embeddings (`nomic-embed-text`); ChromaDB in-process for vectors (persisted under `./data/chroma`). Loads inbox-state context + retrieved memories per turn; updates memory in the background. Degrades gracefully to stateless chatbot if mem0/Chroma init fails. |
@@ -341,6 +341,10 @@ All settings are read from environment variables prefixed with `AGENT_` (and fro
 | `AGENT_SUGGEST_MAX_ITEMS` | `5` | Max suggestions surfaced at once. |
 | `AGENT_DEFAULT_SCHEDULE_INTERVAL_MINUTES` | *(empty)* | Fallback scheduler interval, in minutes. Used when a user hasn't set their own on `/ui/settings`. Per-user value always wins. |
 | `AGENT_SCHEDULER_TICK_SECONDS` | `60` | How often the scheduler wakes to check whether any user is due. |
+| `AGENT_POLL_ENABLED` | `true` | Master switch for the real-time inbox poller. |
+| `AGENT_DEFAULT_POLL_INTERVAL_SECONDS` | *(empty)* | Fallback polling interval (seconds) for users without a per-user value. Empty/`0` = polling off by default. |
+| `AGENT_POLL_MIN_INTERVAL_SECONDS` | `30` | Floor on the polling interval, and the poller's tick cadence. |
+| `AGENT_POLL_FETCH_LIMIT` | `25` | Newest-N headers pulled per poll. Bursts larger than this are caught by the next scheduled audit. |
 | `AGENT_CATEGORIZE_ENABLED` | `true` | Ask the classifier to also return a category + `needs_reply` (same LLM call). |
 | `AGENT_APPLY_LABELS_ENABLED` | `true` | Write categories/markers back to the mailbox as Outlook categories / Gmail labels. |
 | `AGENT_LABEL_PREFIX` | `AgentX` | Namespace for every label the agent applies (e.g. `AgentX/Finance`, `AgentX/Phishing`). |
@@ -380,6 +384,25 @@ Two ways to set the interval, with **per-user override taking precedence**:
 If neither is set, scheduling is disabled. The interval is in minutes — `15` for "every 15 minutes", `60` for hourly, `360` for every 6h. The scheduler tick rate (`AGENT_SCHEDULER_TICK_SECONDS`, default 60s) bounds the precision; lower it if you want sub-minute scheduling.
 
 This pairs naturally with rules + the domain blocklist: once you've trained the system, scheduled audits can run unattended and the inbox stays clean.
+
+## Real-time polling (near-live scanning)
+
+Instead of waiting for the next scheduled audit, the agent can **poll the inbox for newly-arrived mail and scan it within seconds**. The `Poller` background loop wakes every `AGENT_POLL_MIN_INTERVAL_SECONDS` (default 30s), and for each user whose polling interval is due it:
+
+1. Fetches the newest `AGENT_POLL_FETCH_LIMIT` message headers (the same cheap metadata fetch audits use — **no public webhook endpoint required**, so it works on localhost).
+2. Compares them against a per-user **watermark** (`users.poll_cursor`, the newest received timestamp seen so far) to find mail that arrived since the last poll.
+3. Queues a focused **`scan`** task carrying just those new messages. The worker runs them through the *same* pipeline as an audit — auto-delete blocked senders → classify (+ categorize + actions) → flag phishing → write labels back — and the result appears in the audit list tagged `scan`.
+
+On first enable the watermark is **baselined to "now"**, so only mail arriving *after* you turn polling on gets scanned (no backfill storm). Idle polls cost a single metadata fetch and no LLM work.
+
+Two ways to set the interval, with **per-user override taking precedence** (same pattern as scheduled audits):
+
+1. **Per-user** via `/ui/settings` ("Check for new mail every N seconds") — stored on `users.poll_interval_seconds`. `0`/blank disables it.
+2. **Global default** via `AGENT_DEFAULT_POLL_INTERVAL_SECONDS` — applied to any user without an override.
+
+The effective interval is floored at `AGENT_POLL_MIN_INTERVAL_SECONDS`. The whole loop can be switched off with `AGENT_POLL_ENABLED=false`.
+
+**Backstop & limits.** Polling is a *fast path*, not a replacement for scheduled audits — keep a schedule on as a safety net. Anything polling can miss is caught by the next audit: mail that arrived while polling was off or the process was down, or a burst of **more than `AGENT_POLL_FETCH_LIMIT` messages between two polls** (only the newest N headers are pulled per poll). For true server-push delivery (Microsoft Graph change-notification webhooks / Gmail Pub/Sub) you'd need a publicly-reachable HTTPS endpoint (`PUBLIC_BASE_URL` + cloudflared); polling deliberately avoids that requirement.
 
 ## Chat assistant
 
