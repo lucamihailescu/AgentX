@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     session_secret: str
     cache_key: str | None = None
     db_path: str = "tasks.db"
+    # Human-readable build identifier shown in the UI footer. Baked into the
+    # image at build time (Dockerfile ARG BUILD_VERSION → AGENT_BUILD_VERSION),
+    # so every running build is identifiable. Defaults to "dev" for local runs.
+    build_version: str = "dev"
     # When set (e.g. https://agent.example.com), the agent assumes it's
     # reachable on this URL over HTTPS. OAuth redirect URIs derive from
     # it, the session cookie gets the Secure flag, and CSRF protection

@@ -5,7 +5,13 @@
 
 services:
   agent:
-    build: .
+    build:
+      context: .
+      args:
+        # Stamps the image (and the UI footer) with a build identifier.
+        # Set BUILD_VERSION in .env or the environment, e.g.
+        #   BUILD_VERSION=$(git describe --tags --always) docker compose build
+        BUILD_VERSION: ${BUILD_VERSION:-dev}
     ports:
       - "8080:8080"
     environment:
