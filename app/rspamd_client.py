@@ -140,35 +140,64 @@ async def check_raw(mime: bytes, message: dict, user_id: str) -> dict | None:
     return await _check_mime(mime, message.get("from"), message.get("id"), user_id)
 
 
+def _controller_url() -> str | None:
+    """Resolve the Rspamd CONTROLLER base URL, where /learnspam // /learnham
+    live (a different worker from the /checkv2 scanner).
+
+    Precedence: explicit ``rspamd_controller_url`` → derive from ``rspamd_url``
+    by swapping the default scanner port ``:11333`` for the controller port
+    ``:11334`` → ``None`` (can't determine; learning is skipped).
+    """
+    if settings.rspamd_controller_url:
+        return settings.rspamd_controller_url.rstrip("/")
+    if settings.rspamd_url:
+        base = settings.rspamd_url.rstrip("/")
+        if base.endswith(":11333"):
+            return base[: -len(":11333")] + ":11334"
+        # Non-default scanner port and no explicit controller URL — we can't
+        # safely guess the controller endpoint.
+        logger.warning(
+            "rspamd: can't derive controller URL from %s; set "
+            "AGENT_RSPAMD_CONTROLLER_URL so learning works", base,
+        )
+    return None
+
+
 async def learn(message: dict, user_id: str, label: str) -> None:
     """Fire-and-forget Bayes training. `label` is "spam" or "ham".
 
-    Silent on failure — training is best-effort and must never break a
-    user-facing action.
+    Trains via the Rspamd CONTROLLER (/learnspam, /learnham) — NOT the scanner
+    worker, which rejects learn with "invalid command". Best-effort: silent
+    success, warns on real failure, never breaks a user-facing action.
     """
     if not is_enabled():
         return
     if label not in ("spam", "ham"):
         return
+    url = _controller_url()
+    if not url:
+        return
     mime = synthesize_mime(message)
-    url = f"{settings.rspamd_url.rstrip('/')}/learn{label}"
     headers = {
         "Deliver-To": _deliver_to(user_id),
         "From": message.get("from") or "unknown@unknown.example",
         "Content-Type": "message/rfc822",
     }
+    if settings.rspamd_password:
+        headers["Password"] = settings.rspamd_password
     try:
         async with httpx.AsyncClient(timeout=settings.rspamd_timeout_seconds) as client:
-            resp = await client.post(url, content=mime, headers=headers)
+            resp = await client.post(f"{url}/learn{label}", content=mime, headers=headers)
             if resp.status_code >= 400:
-                # 208 "already learned" is fine; surface only true failures.
+                # 208 "already learned" is < 400 and fine; surface real failures
+                # (e.g. 401 → controller needs a password / secure_ip).
                 body = resp.text[:200] if resp.text else ""
-                logger.info(
+                logger.warning(
                     "rspamd learn%s for %s returned %s: %s",
                     label, message.get("id"), resp.status_code, body,
                 )
     except httpx.HTTPError as exc:
-        logger.info("rspamd learn%s failed for %s: %s", label, message.get("id"), exc)
+        logger.warning("rspamd learn%s failed for %s: %s", label, message.get("id"), exc)
 
 
 def fire_learn(message: dict, user_id: str, label: str) -> None:

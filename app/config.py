@@ -105,7 +105,17 @@ class Settings(BaseSettings):
     # Rspamd and the two verdicts are blended (plus the per-sender prior).
     # Set to None / empty to disable. User actions (delete/unsub/allow/deny)
     # additionally train Rspamd's per-user Bayes when enabled.
+    # `rspamd_url` is the SCANNER (normal worker, default :11333) — /checkv2.
     rspamd_url: str | None = None
+    # Bayes training (/learnspam, /learnham) is a CONTROLLER command on a
+    # different worker (default :11334) — NOT the scanner. When unset but
+    # rspamd_url ends in :11333, the controller URL is derived by swapping the
+    # port to 11334. Set explicitly for a non-default controller host/port.
+    rspamd_controller_url: str | None = None
+    # Controller password (sent as the `Password` header on learn). Leave empty
+    # when the controller trusts the agent via `secure_ip` — the default for the
+    # bundled rspamd (see rspamd/local.d/worker-controller.inc).
+    rspamd_password: str | None = None
     # Weight of Rspamd's verdict in the blend, relative to Ollama (weight 1.0).
     # 0.6 ≈ "trusted second opinion"; 1.0 = equal vote; 0 disables.
     rspamd_weight: float = 0.6
