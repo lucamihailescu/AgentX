@@ -30,9 +30,15 @@ _CATEGORIZE_ADDENDUM = (
     '  - "category": one of EXACTLY these values — '
     + ", ".join(f'"{c}"' for c in CATEGORIES)
     + ". Pick the single best fit; use \"Other\" when unsure.\n"
-    '  - "needs_reply": boolean — true only if this looks like a personal or '
-    "business message a human is expected to reply to (not newsletters, "
-    "receipts, notifications, or marketing).\n\n"
+    '  - "needs_reply": boolean — true ONLY when a real person is writing '
+    "directly to the recipient and is waiting for a personal answer (a "
+    "colleague, friend, customer, or vendor who asked something). Judge this "
+    "by WHO is writing and whether they await a reply — NOT by punctuation. A "
+    "question mark or a rhetorical/clickbait headline question in the SUBJECT "
+    "of a newsletter, article, advice column, promotion, digest, or automated "
+    "notification does NOT make it needs_reply. Newsletters, promotions, "
+    "receipts, notifications, and mail from no-reply/automated senders are "
+    "ALWAYS false.\n\n"
     'Full example: {"spam": false, "confidence": 0.88, "reason": "personal '
     'note from a colleague", "category": "Personal", "needs_reply": true}'
 )
@@ -113,6 +119,37 @@ def _build_prompt(
         f"Preview: {(preview or '').strip()}"
     )
     return "".join(parts)
+
+
+# Local-parts that mark an automated / unattended sender — mail from these is
+# never something a human is "waiting to reply to".
+_NOREPLY_HINTS = (
+    "noreply", "no-reply", "no_reply",
+    "donotreply", "do-not-reply", "do_not_reply",
+)
+# Categories that are, by definition, broadcast — not interpersonal mail.
+_BULK_CATEGORIES = frozenset({"Newsletter/Promotions", "Notifications/Updates"})
+
+
+def _is_bulk_mail(message: dict, category: str | None) -> bool:
+    """Deterministic 'this is broadcast/automated, not a personal message'
+    check, used to veto a model `needs_reply=true` on bulk mail.
+
+    The classic false positive is a newsletter / advice column whose subject is
+    phrased as a question ("Will I get canceled for ...?"); the model reads the
+    question mark as "awaiting a reply". These signals don't depend on the LLM:
+
+      * a `List-Unsubscribe` header (captured as `unsubscribe_url`) — only bulk
+        senders ship one;
+      * a no-reply / do-not-reply local-part;
+      * a category that is inherently broadcast (newsletter / notification).
+    """
+    if message.get("unsubscribe_url"):
+        return True
+    local = (message.get("from") or "").split("@", 1)[0].lower()
+    if any(hint in local for hint in _NOREPLY_HINTS):
+        return True
+    return category in _BULK_CATEGORIES
 
 
 def _coerce_bool(value: object) -> bool | None:
@@ -229,6 +266,10 @@ async def classify(
         vd = verdict if isinstance(verdict, dict) else {}
         result["category"] = normalize_category(vd.get("category"))
         result["needs_reply"] = bool(_coerce_bool(vd.get("needs_reply")))
+        # Veto needs_reply on broadcast/automated mail regardless of how the
+        # subject is phrased — the model over-triggers on question headlines.
+        if result["needs_reply"] and _is_bulk_mail(message, result["category"]):
+            result["needs_reply"] = False
         if extract_actions:
             action = vd.get("action")
             result["action"] = action.strip()[:160] if isinstance(action, str) and action.strip() else None
