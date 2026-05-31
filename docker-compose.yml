@@ -79,7 +79,7 @@ services:
       - rspamd
 
   rspamd:
-    image: rspamd/rspamd:3.8
+    image: rspamd/rspamd:3.14
     # Per-user Bayes + Redis backend wired via mounted local.d overrides.
     # Ports kept internal — only the agent container talks to rspamd.
     expose:
@@ -90,6 +90,19 @@ services:
       - ./data/rspamd:/var/lib/rspamd
     depends_on:
       - redis
+      - unbound
+
+  # Private recursive DNS resolver for rspamd's DNSBL lookups. Public/shared
+  # resolvers (Docker's embedded DNS → host forwarder) get rate-limited or
+  # refused by blocklist providers (blocklist.de, dnswl.org, …), which caused
+  # the "rbl.lua: query timed out" log spam. Unbound queries the blocklists'
+  # authoritative nameservers directly. rspamd points at it by service name
+  # (see rspamd/local.d/options.inc) — supported on rspamd >= 3.14.
+  unbound:
+    image: mvance/unbound:latest
+    restart: unless-stopped
+    expose:
+      - "53"
 
   redis:
     image: redis:7-alpine
