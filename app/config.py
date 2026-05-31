@@ -27,6 +27,23 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = 2.0
     default_schedule_interval_minutes: int | None = None
     scheduler_tick_seconds: float = 60.0
+
+    # ── Real-time polling (delta) ────────────────────────────────────────
+    # Poll each enabled user's inbox for newly-arrived mail and scan it in
+    # near-real-time, instead of waiting for the next scheduled audit. Reuses
+    # the same metadata fetch — no public webhook endpoint required, so it
+    # works on localhost. Scheduled audits remain the backstop.
+    #   poll_enabled                  — master switch for the Poller loop.
+    #   default_poll_interval_seconds — fallback for users without a per-user
+    #                                   override (None/0 = polling off).
+    #   poll_min_interval_seconds     — floor + the loop's tick cadence.
+    #   poll_fetch_limit              — newest-N headers pulled per poll; a
+    #                                   burst larger than this is caught by the
+    #                                   next scheduled audit.
+    poll_enabled: bool = True
+    default_poll_interval_seconds: int | None = None
+    poll_min_interval_seconds: int = 30
+    poll_fetch_limit: int = 25
     # Daily digest of the last 24h, emitted once each morning. digest_hour is
     # the local hour (0-23) it fires; digest_timezone is the IANA zone that
     # defines "local"; digest_window_hours is the look-back window.

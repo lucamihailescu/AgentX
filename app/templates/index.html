@@ -69,6 +69,8 @@
                 <code>{{ t.task_id[:8] }}</code>
                 {% if t.kind == 'purge' %}
                   <span class="pill muted" style="margin-left: .5rem">cleanup</span>
+                {% elif t.kind == 'scan' %}
+                  <span class="pill accent" style="margin-left: .5rem">scan</span>
                 {% endif %}
                 {% if t.cursor_before %}
                   <div class="meta mono" style="font-size: .68rem; margin-top: .15rem">before {{ t.cursor_before }}</div>

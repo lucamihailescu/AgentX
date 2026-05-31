@@ -31,6 +31,43 @@
                placeholder="(disabled)" />
         <span class="unit">minutes</span>
       </label>
+
+      <hr class="sep" />
+
+      <h2 style="font-size: 1rem; margin: 0">Real-time polling</h2>
+      <p class="meta" style="max-width: 56ch; margin: .25rem 0 .25rem">
+        Check the inbox for newly-arrived mail and scan it within seconds —
+        near real-time, instead of waiting for the next scheduled audit. Each
+        new message is classified, phishing-checked, and labeled just like an
+        audit; the results show up as a <code>scan</code> in the audit list.
+        Scheduled audits stay on as a backstop. Set to <code>0</code> or leave
+        blank to disable.
+        {% if default_poll_interval_seconds %}
+          Blank falls back to the default
+          (<code>{{ default_poll_interval_seconds }}s</code>).
+        {% endif %}
+      </p>
+      <label>
+        <span>Check for new mail every</span>
+        <input type="number" name="poll_interval_seconds"
+               min="0" step="1"
+               value="{{ poll_interval_seconds or '' }}"
+               placeholder="(disabled)"
+               {% if not poll_enabled %}disabled{% endif %} />
+        <span class="unit">seconds</span>
+      </label>
+      {% if not poll_enabled %}
+        <p class="meta" style="font-size: .8rem; color: var(--spam)">
+          Polling is disabled globally (<code>AGENT_POLL_ENABLED=false</code>).
+        </p>
+      {% else %}
+        <p class="meta" style="font-size: .78rem; color: var(--text-faint)">
+          Minimum {{ poll_min_interval_seconds }}s (lower values are floored).
+          A burst of more than a handful of messages between polls is caught by
+          the next scheduled audit.
+        </p>
+      {% endif %}
+
       <button type="submit" class="primary">save</button>
     </form>
 
@@ -59,16 +96,24 @@
   <style>
     .settings-form {
       display: flex;
-      gap: .65rem;
-      align-items: center;
-      flex-wrap: wrap;
+      flex-direction: column;
+      gap: .75rem;
+      align-items: flex-start;
       margin-top: 1.25rem;
     }
     .settings-form label {
       display: flex;
       align-items: center;
       gap: .55rem;
+      flex-wrap: wrap;
     }
+    .settings-form .sep {
+      width: 100%;
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: .35rem 0 .15rem;
+    }
+    .settings-form h2 { font-variation-settings: "opsz" 60; }
     .settings-form input[type="number"] {
       width: 84px;
       padding: .45rem .6rem;

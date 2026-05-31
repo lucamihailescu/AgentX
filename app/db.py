@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(user_id),
-    kind TEXT NOT NULL DEFAULT 'audit',     -- 'audit', 'purge', or 'digest'
+    kind TEXT NOT NULL DEFAULT 'audit',     -- 'audit', 'purge', 'digest', or 'scan'
     status TEXT NOT NULL,
     cursor_before TEXT,
     error TEXT,
@@ -85,6 +85,12 @@ _FORWARD_COMPAT_ALTERS = (
     "ALTER TABLE users ADD COLUMN schedule_interval_minutes INTEGER",
     "ALTER TABLE users ADD COLUMN provider TEXT NOT NULL DEFAULT 'microsoft'",
     "ALTER TABLE users ADD COLUMN digest_interval_days INTEGER",
+    # Real-time polling: per-user interval override + the watermark cursor
+    # (newest received timestamp seen so far). `tasks.payload` carries the
+    # JSON message envelopes a 'scan' task should process.
+    "ALTER TABLE users ADD COLUMN poll_interval_seconds INTEGER",
+    "ALTER TABLE users ADD COLUMN poll_cursor TEXT",
+    "ALTER TABLE tasks ADD COLUMN payload TEXT",
 )
 
 

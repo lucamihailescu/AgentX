@@ -11,19 +11,17 @@ from .config import settings
 from . import calibration
 from . import digest as digest_module
 from . import feedback
-from . import phishing
 from . import search_index
 from .providers import get_provider
 from .providers.base import AuthError
 from .rules import load_rule_index
 from . import sender_stats
 from .tasks import (
-    apply_categories,
-    auto_delete,
-    classify_messages,
     fetch_messages,
+    fetch_new_messages,
     generate_report,
     purge_mailbox,
+    run_pipeline,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,7 +85,8 @@ class Worker:
         async with aiosqlite.connect(settings.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                """SELECT t.task_id, t.user_id, t.cursor_before, t.kind, u.provider
+                """SELECT t.task_id, t.user_id, t.cursor_before, t.kind,
+                          t.payload, u.provider
                    FROM tasks t JOIN users u ON t.user_id = u.user_id
                    WHERE t.status = 'queued' ORDER BY t.created_at LIMIT 1"""
             )
@@ -119,6 +118,8 @@ class Worker:
         try:
             if kind == "purge":
                 await self._process_purge(task, provider)
+            elif kind == "scan":
+                await self._process_scan(task, provider)
             else:
                 await self._process_audit(task, provider)
         except AuthError as exc:
@@ -159,22 +160,10 @@ class Worker:
                 "audit %s using calibration priors for %d sender(s)",
                 task_id, len(priors),
             )
-        messages = await auto_delete(provider, user_id, messages, rules)
-        classified = await classify_messages(
-            messages,
-            rules,
-            examples=examples,
-            priors=priors,
-            user_id=user_id,
-            provider=provider,
+        report = await run_pipeline(
+            provider, user_id, messages,
+            rules=rules, examples=examples, priors=priors,
         )
-        # Flag phishing/BEC from header metadata (must run before
-        # generate_report strips the raw headers it reads).
-        phishing.flag_messages(classified)
-        # Write categories + phishing marker back to the mailbox before
-        # building the report, which also strips the transient label plumbing.
-        await apply_categories(provider, user_id, classified)
-        report = await generate_report(classified)
         await self._update(task_id, status="completed", result_data=json.dumps(report))
         await sender_stats.record_audit_completion(user_id, report)
         # Index for semantic search (best-effort; never fails the audit).
@@ -182,6 +171,40 @@ class Worker:
             await search_index.index_messages(user_id, task_id, report["messages"])
         except Exception:
             logger.exception("search indexing failed for %s", task_id)
+
+    async def _process_scan(self, task: dict, provider) -> None:
+        """Process a real-time scan task — the focused equivalent of an audit
+        over just the new messages the Poller captured in `payload`. Same
+        pipeline (classify → phishing → label), same report shape, so it lists
+        and renders like an audit."""
+        task_id = task["task_id"]
+        user_id = task["user_id"]
+        try:
+            messages = json.loads(task.get("payload") or "[]")
+        except json.JSONDecodeError:
+            messages = []
+        if not messages:
+            await self._update(
+                task_id, status="completed",
+                result_data=json.dumps(await generate_report([])),
+            )
+            return
+        rules = await load_rule_index(user_id)
+        examples = await feedback.collect_examples(
+            user_id, settings.ollama_examples_per_class
+        )
+        priors = await calibration.load_priors(user_id)
+        report = await run_pipeline(
+            provider, user_id, messages,
+            rules=rules, examples=examples, priors=priors,
+        )
+        report["kind"] = "scan"
+        await self._update(task_id, status="completed", result_data=json.dumps(report))
+        await sender_stats.record_audit_completion(user_id, report)
+        try:
+            await search_index.index_messages(user_id, task_id, report["messages"])
+        except Exception:
+            logger.exception("search indexing failed for scan %s", task_id)
 
     async def _process_purge(self, task: dict, provider) -> None:
         task_id = task["task_id"]
@@ -365,5 +388,126 @@ class Scheduler:
                    (task_id, user_id, kind, status, created_at, updated_at)
                    VALUES (?, ?, 'digest', 'queued', ?, ?)""",
                 (task_id, user_id, now, now),
+            )
+            await db.commit()
+
+
+class Poller:
+    """Near-real-time inbox polling.
+
+    For each user with polling enabled, fetch the newest message headers,
+    detect mail that arrived since the last poll (a received-timestamp
+    watermark stored on `users.poll_cursor`), and queue a focused `scan` task
+    for just those messages. Reuses the same metadata fetch as audits — no
+    public webhook endpoint required, so it works on localhost. Scheduled
+    audits remain the backstop for anything missed while polling was off, the
+    process was down, or a burst exceeded `poll_fetch_limit`.
+
+    Per-user interval override (`users.poll_interval_seconds`) wins; otherwise
+    `AGENT_DEFAULT_POLL_INTERVAL_SECONDS`. Either way the effective interval is
+    floored at `poll_min_interval_seconds`, which is also the loop's tick rate.
+    """
+
+    def __init__(self) -> None:
+        self._stop = asyncio.Event()
+        # In-memory last-poll time per user; the durable state (the watermark)
+        # lives in users.poll_cursor, so a restart just re-baselines timing.
+        self._last_poll: dict[str, datetime] = {}
+
+    async def stop(self) -> None:
+        self._stop.set()
+
+    async def run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self._tick()
+            except Exception:
+                logger.exception("Poller tick failed")
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=max(settings.poll_min_interval_seconds, 1),
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _tick(self) -> None:
+        if not settings.poll_enabled:
+            return
+        default_iv = settings.default_poll_interval_seconds
+        async with aiosqlite.connect(settings.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT u.user_id, u.provider, u.poll_interval_seconds,
+                          u.poll_cursor,
+                          EXISTS(SELECT 1 FROM tasks t
+                                 WHERE t.user_id = u.user_id
+                                   AND t.kind = 'scan'
+                                   AND t.status IN ('queued', 'processing')) AS scan_in_flight
+                   FROM users u"""
+            )
+            users = await cur.fetchall()
+
+        now = datetime.now(timezone.utc)
+        for u in users:
+            iv = u["poll_interval_seconds"] or default_iv
+            if not iv or iv <= 0:
+                continue
+            iv = max(int(iv), settings.poll_min_interval_seconds)
+            last = self._last_poll.get(u["user_id"])
+            if last and (now - last).total_seconds() < iv:
+                continue
+            # Space polls by the interval even when a scan is still running.
+            self._last_poll[u["user_id"]] = now
+            if u["scan_in_flight"]:
+                continue
+            try:
+                await self._poll_user(dict(u))
+            except AuthError as exc:
+                logger.warning("poll for %s failed (auth): %s", u["user_id"], exc)
+            except Exception:
+                logger.exception("poll for %s failed", u["user_id"])
+
+    async def _poll_user(self, u: dict) -> None:
+        user_id = u["user_id"]
+        try:
+            provider = get_provider(u["provider"])
+        except ValueError:
+            return
+        cursor = u["poll_cursor"]
+        new_msgs, new_cursor = await fetch_new_messages(
+            provider, user_id, cursor=cursor, limit=settings.poll_fetch_limit
+        )
+        # Advance the watermark first so the same messages aren't re-detected
+        # next tick even if enqueuing/processing fails (worst case: a scan is
+        # missed and the scheduled audit catches it — never a reprocess loop).
+        if new_cursor and new_cursor != cursor:
+            await self._set_cursor(user_id, new_cursor)
+        if not new_msgs:
+            return
+        await self._enqueue_scan(user_id, new_msgs)
+        logger.info(
+            "poll: queued scan of %d new message(s) for %s", len(new_msgs), user_id
+        )
+
+    @staticmethod
+    async def _set_cursor(user_id: str, cursor: str) -> None:
+        async with aiosqlite.connect(settings.db_path) as db:
+            await db.execute(
+                "UPDATE users SET poll_cursor = ?, updated_at = ? WHERE user_id = ?",
+                (cursor, _now(), user_id),
+            )
+            await db.commit()
+
+    @staticmethod
+    async def _enqueue_scan(user_id: str, messages: list[dict]) -> None:
+        task_id = str(uuid.uuid4())
+        now = _now()
+        async with aiosqlite.connect(settings.db_path) as db:
+            await db.execute(
+                """INSERT INTO tasks
+                   (task_id, user_id, kind, status, payload, created_at, updated_at)
+                   VALUES (?, ?, 'scan', 'queued', ?, ?, ?)""",
+                (task_id, user_id, json.dumps(messages), now, now),
             )
             await db.commit()

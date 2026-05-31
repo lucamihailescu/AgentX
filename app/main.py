@@ -35,7 +35,7 @@ from . import suggestions
 from .providers import PROVIDERS, get_provider
 from .providers.base import AuthError
 from .unsubscribe import UnsubscribeError, perform_unsubscribe
-from .worker import Scheduler, Worker
+from .worker import Poller, Scheduler, Worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("agentx")
@@ -86,8 +86,10 @@ async def lifespan(app: FastAPI):
     await init_db()
     worker = Worker()
     scheduler = Scheduler()
+    poller = Poller()
     worker_task = asyncio.create_task(worker.run(), name="worker")
     scheduler_task = asyncio.create_task(scheduler.run(), name="scheduler")
+    poller_task = asyncio.create_task(poller.run(), name="poller")
     enabled = [n for n, p in PROVIDERS.items() if p.is_configured()]
     logger.info("agent started; providers=%s", enabled or "(none configured)")
     try:
@@ -95,9 +97,12 @@ async def lifespan(app: FastAPI):
     finally:
         await worker.stop()
         await scheduler.stop()
-        for t in (worker_task, scheduler_task):
+        await poller.stop()
+        for t in (worker_task, scheduler_task, poller_task):
             t.cancel()
-        await asyncio.gather(worker_task, scheduler_task, return_exceptions=True)
+        await asyncio.gather(
+            worker_task, scheduler_task, poller_task, return_exceptions=True
+        )
         for p in PROVIDERS.values():
             await p.aclose()
 
@@ -1068,7 +1073,7 @@ async def ui_settings(request: Request):
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            """SELECT schedule_interval_minutes, provider
+            """SELECT schedule_interval_minutes, poll_interval_seconds, provider
                FROM users WHERE user_id = ?""",
             (user_id,),
         )
@@ -1098,6 +1103,10 @@ async def ui_settings(request: Request):
             "username": request.session.get("username"),
             "schedule_interval_minutes": row["schedule_interval_minutes"] if row else None,
             "default_schedule_interval_minutes": settings.default_schedule_interval_minutes,
+            "poll_interval_seconds": row["poll_interval_seconds"] if row else None,
+            "poll_enabled": settings.poll_enabled,
+            "default_poll_interval_seconds": settings.default_poll_interval_seconds,
+            "poll_min_interval_seconds": settings.poll_min_interval_seconds,
             "digest_enabled": settings.digest_enabled,
             "digest_hour": settings.digest_hour,
             "digest_timezone": settings.digest_timezone,
@@ -1127,12 +1136,22 @@ async def ui_settings_save(request: Request):
     interval = _parse_positive_int(
         form.get("schedule_interval_minutes"), "schedule_interval_minutes"
     )
+    poll_interval = _parse_positive_int(
+        form.get("poll_interval_seconds"), "poll_interval_seconds"
+    )
     async with aiosqlite.connect(settings.db_path) as db:
         await db.execute(
             """UPDATE users
-               SET schedule_interval_minutes = ?, updated_at = ?
+               SET schedule_interval_minutes = ?,
+                   poll_interval_seconds = ?,
+                   updated_at = ?
                WHERE user_id = ?""",
-            (interval, datetime.now(timezone.utc).isoformat(), user_id),
+            (
+                interval,
+                poll_interval,
+                datetime.now(timezone.utc).isoformat(),
+                user_id,
+            ),
         )
         await db.commit()
     return RedirectResponse("/ui/settings", status_code=303)

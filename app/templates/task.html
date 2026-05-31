@@ -10,7 +10,7 @@
     <div>
       <div class="eyebrow"><a class="plain" href="/">← all audits</a></div>
       <h1>
-        {% if task.kind == 'purge' %}Cleanup{% else %}Audit{% endif %}
+        {% if task.kind == 'purge' %}Cleanup{% elif task.kind == 'scan' %}Scan{% else %}Audit{% endif %}
         <span class="taskid">{{ task.task_id[:8] }}</span>.
       </h1>
     </div>
