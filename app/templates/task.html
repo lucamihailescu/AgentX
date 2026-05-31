@@ -812,9 +812,14 @@
     .raw { margin-top: 2.5rem; }
 
     .row-rules {
-      white-space: nowrap;
+      /* Let the action buttons wrap within the narrow column instead of
+         forcing the whole table wider (which stretched the From column and
+         introduced horizontal scroll once the "not spam" button was added). */
+      white-space: normal;
       text-align: right;
+      width: 1%;
     }
+    .row-rules form { white-space: nowrap; }
     .rule-btn {
       padding: 0;
       width: 26px;
