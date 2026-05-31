@@ -11,11 +11,14 @@ from .config import settings
 from . import calibration
 from . import digest as digest_module
 from . import feedback
+from . import phishing
+from . import search_index
 from .providers import get_provider
 from .providers.base import AuthError
 from .rules import load_rule_index
 from . import sender_stats
 from .tasks import (
+    apply_categories,
     auto_delete,
     classify_messages,
     fetch_messages,
@@ -165,9 +168,20 @@ class Worker:
             user_id=user_id,
             provider=provider,
         )
+        # Flag phishing/BEC from header metadata (must run before
+        # generate_report strips the raw headers it reads).
+        phishing.flag_messages(classified)
+        # Write categories + phishing marker back to the mailbox before
+        # building the report, which also strips the transient label plumbing.
+        await apply_categories(provider, user_id, classified)
         report = await generate_report(classified)
         await self._update(task_id, status="completed", result_data=json.dumps(report))
         await sender_stats.record_audit_completion(user_id, report)
+        # Index for semantic search (best-effort; never fails the audit).
+        try:
+            await search_index.index_messages(user_id, task_id, report["messages"])
+        except Exception:
+            logger.exception("search indexing failed for %s", task_id)
 
     async def _process_purge(self, task: dict, provider) -> None:
         task_id = task["task_id"]

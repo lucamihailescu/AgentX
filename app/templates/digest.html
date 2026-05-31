@@ -65,7 +65,93 @@
         <div class="stat-label">You unsubscribed</div>
         <div class="stat-value muted">{{ c.user_unsubscribed }}</div>
       </div>
+      {% if c.phishing_flagged %}
+        <div class="stat">
+          <div class="stat-label">Phishing</div>
+          <div class="stat-value spam">{{ c.phishing_flagged }}</div>
+        </div>
+      {% endif %}
+      {% if c.needs_reply %}
+        <div class="stat">
+          <div class="stat-label">Needs reply</div>
+          <div class="stat-value accent">{{ c.needs_reply }}</div>
+        </div>
+      {% endif %}
     </div>
+
+    {% if task.result.phishing %}
+      <h2 style="margin-top: 2rem; color: var(--spam)">⚠ Possible phishing <span class="meta" style="font-family: var(--mono); font-size: .72rem; letter-spacing: .04em">— {{ task.result.phishing | length }} flagged</span></h2>
+      <div class="panel flush">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 220px">from</th>
+              <th>subject &amp; why</th>
+              <th style="width: 80px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in task.result.phishing %}
+              <tr>
+                <td><code class="from">{{ m.from or '—' }}</code></td>
+                <td>
+                  <div class="subject-line">{{ m.subject or '(no subject)' }}</div>
+                  {% if m.phishing_reasons %}
+                    <div class="phish-reasons">⚠ {{ m.phishing_reasons | join('; ') }}</div>
+                  {% endif %}
+                </td>
+                <td class="row-rules">
+                  {% if m.message_id %}
+                    <a class="small button"
+                       href="/ui/tasks/{{ m.audit_task_id }}#row-{{ m.message_id }}"
+                       title="Open in source audit">act ↗</a>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    {% if task.result.action_items %}
+      <h2 style="margin-top: 2rem">Action items <span class="meta" style="font-family: var(--mono); font-size: .72rem; letter-spacing: .04em">— {{ task.result.action_items | length }} awaiting you</span></h2>
+      <div class="panel flush">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 220px">from</th>
+              <th>what's asked</th>
+              <th style="width: 110px">due</th>
+              <th style="width: 80px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in task.result.action_items %}
+              <tr>
+                <td><code class="from">{{ m.from or '—' }}</code></td>
+                <td>
+                  <div class="subject-line">{{ m.subject or '(no subject)' }}</div>
+                  {% if m.action %}
+                    <div class="action-item">→ {{ m.action }}</div>
+                  {% elif m.needs_reply %}
+                    <div class="action-item muted">↩ wants a reply</div>
+                  {% endif %}
+                </td>
+                <td class="meta mono" style="font-size: .76rem; color: var(--accent)">{{ m.due or '' }}</td>
+                <td class="row-rules">
+                  {% if m.message_id %}
+                    <a class="small button"
+                       href="/ui/tasks/{{ m.audit_task_id }}#row-{{ m.message_id }}"
+                       title="Open in source audit">open ↗</a>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
 
     {% if task.result.top_spam_senders %}
       <h2 style="margin-top: 2rem">Top spam senders</h2>
@@ -272,5 +358,18 @@
       border-radius: 3px;
       letter-spacing: 0;
     }
+    .phish-reasons {
+      margin-top: .3rem;
+      font-family: var(--mono);
+      font-size: .7rem;
+      line-height: 1.4;
+      color: var(--spam);
+    }
+    .action-item {
+      margin-top: .3rem;
+      font-size: .82rem;
+      color: var(--text);
+    }
+    .action-item.muted { color: var(--text-muted); }
   </style>
 {% endblock %}

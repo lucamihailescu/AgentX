@@ -152,7 +152,28 @@
           <div class="stat-value muted">{{ task.result.unknown_count }}</div>
         </div>
       {% endif %}
+      {% if task.result.needs_reply_count %}
+        <div class="stat">
+          <div class="stat-label">Needs reply</div>
+          <div class="stat-value accent">{{ task.result.needs_reply_count }}</div>
+        </div>
+      {% endif %}
+      {% if task.result.phishing_count %}
+        <div class="stat">
+          <div class="stat-label">Phishing</div>
+          <div class="stat-value spam">{{ task.result.phishing_count }}</div>
+        </div>
+      {% endif %}
     </div>
+
+    {% if task.result.category_counts %}
+      <div class="cat-breakdown">
+        <span class="eyebrow inline">categories</span>
+        {% for cat, n in task.result.category_counts | dictsort(by='value', reverse=true) %}
+          <span class="cat-chip">{{ cat }}<span class="cat-n">{{ n }}</span></span>
+        {% endfor %}
+      </div>
+    {% endif %}
 
     <p class="meta" style="margin: 0 0 1.5rem">
       <span class="eyebrow inline">generated</span>&nbsp;{{ task.result.generated_at }}
@@ -187,6 +208,22 @@
           <button type="button" class="chip" data-filter-status="auto-deleted">auto-del</button>
         </div>
       </div>
+      {% if task.result.category_counts or task.result.needs_reply_count or task.result.phishing_count %}
+        <div class="filter-bar cat-filter">
+          <div class="filter-chips">
+            <button type="button" class="chip cat active" data-filter-category="">all categories</button>
+            {% for cat, n in task.result.category_counts | dictsort(by='value', reverse=true) %}
+              <button type="button" class="chip cat" data-filter-category="{{ cat }}">{{ cat }}</button>
+            {% endfor %}
+            {% if task.result.needs_reply_count %}
+              <button type="button" class="chip cat" data-filter-category="__needs_reply__">needs reply</button>
+            {% endif %}
+            {% if task.result.phishing_count %}
+              <button type="button" class="chip cat danger-chip" data-filter-category="__phishing__">⚠ phishing</button>
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
 
       <div class="panel flush">
         <table class="audit-table">
@@ -216,6 +253,9 @@
               <tr id="row-{{ m.id }}"
                   {% if m.deleted or m.auto_deleted %}class="deleted-row"{% endif %}
                   data-status="{{ row_status }}"
+                  data-category="{{ m.category or '' }}"
+                  data-needs-reply="{{ '1' if m.needs_reply else '' }}"
+                  data-phishing="{{ '1' if m.phishing else '' }}"
                   data-search="{{ ((m.from or '') ~ ' ' ~ (m.subject or '')) | lower | e }}">
                 <td class="check-cell">
                   {% if (m.spam == true or m.spam is none) and not m.deleted and not m.auto_deleted and not m.rule_applied and m.id %}
@@ -250,6 +290,13 @@
                     <span class="cal-badge cal-raw"
                           title="borderline verdict — re-checked against full raw MIME (real headers, URLs, attachments)">raw</span>
                   {% endif %}
+                  {% if m.phishing and not m.auto_deleted %}
+                    <span class="phish-badge"
+                          title="{{ (m.phishing_reasons or []) | join('; ') }}">⚠ phishing</span>
+                  {% elif m.phishing_reasons and not m.auto_deleted %}
+                    <span class="phish-badge weak"
+                          title="{{ m.phishing_reasons | join('; ') }}">⚠ suspect</span>
+                  {% endif %}
                   {% if m.confidence is not none and not m.deleted and not m.unsubscribed and not m.auto_deleted and not m.rule_applied %}
                     <div class="conf">{{ '%.0f'|format(m.confidence * 100) }}% conf</div>
                   {% endif %}
@@ -261,10 +308,45 @@
                     {% if m.id %}<span class="chevron">▸</span>{% endif %}
                     {{ m.subject or '(no subject)' }}
                   </div>
+                  {% if (m.category and not m.auto_deleted) or m.needs_reply %}
+                    <div class="cat-row">
+                      {% if m.category and not m.auto_deleted %}
+                        <span class="cat-chip sm{% if not m.category_applied and m.id %} pending{% endif %}"
+                              {% if m.category_applied %}title="labeled in mailbox"{% elif m.id %}title="not labeled (write-back off or failed)"{% endif %}>{{ m.category }}</span>
+                      {% endif %}
+                      {% if m.needs_reply %}
+                        <span class="reply-flag" title="model thinks this wants a reply">↩ needs reply</span>
+                      {% endif %}
+                    </div>
+                  {% endif %}
+                  {% if m.action and not m.auto_deleted %}
+                    <div class="action-item">→ {{ m.action }}{% if m.due %} <span class="due">· due {{ m.due }}</span>{% endif %}</div>
+                  {% endif %}
                   {% if m.reason %}<div class="reason">{{ m.reason }}</div>{% endif %}
+                  {% if m.phishing and m.phishing_reasons %}
+                    <div class="phish-reasons">⚠ {{ m.phishing_reasons | join('; ') }}</div>
+                  {% endif %}
+                  {% if m.draft_text %}
+                    <details class="draft-preview" open>
+                      <summary>draft reply saved ✓</summary>
+                      <div class="draft-body">{{ m.draft_text }}</div>
+                    </details>
+                  {% endif %}
                 </td>
                 <td class="meta received">{{ m.received or '' }}</td>
                 <td class="row-rules">
+                  {% if drafts_enabled and m.needs_reply and m.id and m.from and not m.deleted and not m.auto_deleted and not m.draft_created %}
+                    <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/draft"
+                          method="post" class="inline"
+                          data-confirm="Draft a reply to {{ m.from }}? It's saved to your Drafts — never sent."
+                          data-confirm-action="Draft reply">
+                      {% include "_csrf.html" %}
+                      <button type="submit" class="rule-btn draft" title="Generate a reply draft (saved to Drafts, not sent)">✎</button>
+                    </form>
+                  {% endif %}
+                  {% if m.draft_created %}
+                    <span class="draft-saved" title="reply draft saved to your mailbox">draft ✓</span>
+                  {% endif %}
                   {% if (m.spam == true or m.spam is none) and not m.deleted and not m.auto_deleted and not m.rule_applied and m.id and m.from %}
                     <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/rule/allow"
                           method="post" class="inline"
@@ -386,24 +468,41 @@
     // ───── filter bar ─────
     (() => {
       const filterText = document.getElementById('filter-text');
-      const chips = document.querySelectorAll('.chip[data-filter-status]');
-      if (!filterText && chips.length === 0) return;
+      const statusChips = document.querySelectorAll('.chip[data-filter-status]');
+      const catChips = document.querySelectorAll('.chip[data-filter-category]');
+      if (!filterText && statusChips.length === 0 && catChips.length === 0) return;
       let activeStatus = '';
+      let activeCategory = '';
 
       function applyFilter() {
         const q = (filterText?.value || '').trim().toLowerCase();
         document.querySelectorAll('tr[data-status]').forEach(row => {
           const matchText = !q || (row.dataset.search || '').includes(q);
           const matchStatus = !activeStatus || row.dataset.status === activeStatus;
-          row.style.display = matchText && matchStatus ? '' : 'none';
+          let matchCategory = true;
+          if (activeCategory === '__needs_reply__') {
+            matchCategory = row.dataset.needsReply === '1';
+          } else if (activeCategory === '__phishing__') {
+            matchCategory = row.dataset.phishing === '1';
+          } else if (activeCategory) {
+            matchCategory = row.dataset.category === activeCategory;
+          }
+          row.style.display = matchText && matchStatus && matchCategory ? '' : 'none';
         });
       }
 
       filterText?.addEventListener('input', applyFilter);
-      chips.forEach(chip => {
+      statusChips.forEach(chip => {
         chip.addEventListener('click', () => {
           activeStatus = chip.dataset.filterStatus;
-          chips.forEach(c => c.classList.toggle('active', c === chip));
+          statusChips.forEach(c => c.classList.toggle('active', c === chip));
+          applyFilter();
+        });
+      });
+      catChips.forEach(chip => {
+        chip.addEventListener('click', () => {
+          activeCategory = chip.dataset.filterCategory;
+          catChips.forEach(c => c.classList.toggle('active', c === chip));
           applyFilter();
         });
       });
@@ -560,6 +659,134 @@
       color: var(--text-muted);
       margin-top: .3rem;
       font-variation-settings: "opsz" 60;
+    }
+
+    /* ───────── triage: categories + needs-reply ───────── */
+    .cat-breakdown {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: .4rem;
+      margin: 0 0 1rem;
+    }
+    .cat-breakdown .eyebrow.inline {
+      display: inline; margin: 0 .25rem 0 0; color: var(--text-faint);
+    }
+    .cat-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      font-family: var(--mono);
+      font-size: .68rem;
+      letter-spacing: 0.02em;
+      padding: .2rem .5rem;
+      border: 1px solid var(--border-strong);
+      border-radius: 99px;
+      color: var(--text-muted);
+      background: var(--surface);
+      white-space: nowrap;
+    }
+    .cat-chip .cat-n {
+      font-weight: 600;
+      color: var(--accent);
+    }
+    .cat-row { margin-top: .35rem; display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; }
+    .cat-chip.sm { font-size: .62rem; padding: .12rem .45rem; }
+    .cat-chip.sm.pending { opacity: .6; border-style: dashed; }
+    .reply-flag {
+      font-family: var(--mono);
+      font-size: .62rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: .12rem .45rem;
+      border-radius: 99px;
+      color: var(--accent);
+      background: var(--accent-tint);
+      border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+      white-space: nowrap;
+    }
+    .filter-bar.cat-filter { margin-top: .15rem; }
+    .chip.cat.active {
+      color: var(--text);
+      border-color: var(--text-muted);
+      background: var(--surface-2);
+    }
+    .chip.danger-chip { color: var(--spam); border-color: color-mix(in srgb, var(--spam) 40%, transparent); }
+    .chip.danger-chip.active { color: var(--spam); border-color: var(--spam); background: var(--spam-tint); }
+
+    /* ───────── phishing ───────── */
+    .phish-badge {
+      display: inline-block;
+      margin-left: .35rem;
+      padding: .08rem .4rem;
+      font-family: var(--mono);
+      font-size: .58rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--bg);
+      background: var(--spam);
+      border: 1px solid var(--spam);
+      border-radius: 3px;
+      vertical-align: middle;
+      cursor: help;
+      white-space: nowrap;
+    }
+    .phish-badge.weak {
+      color: var(--spam);
+      background: var(--spam-tint);
+    }
+    .phish-reasons {
+      margin-top: .3rem;
+      font-family: var(--mono);
+      font-size: .7rem;
+      line-height: 1.4;
+      color: var(--spam);
+    }
+
+    /* ───────── action items + drafts ───────── */
+    .action-item {
+      margin-top: .35rem;
+      font-size: .8rem;
+      color: var(--text);
+    }
+    .action-item .due {
+      font-family: var(--mono);
+      font-size: .72rem;
+      color: var(--accent);
+    }
+    .rule-btn.draft:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-tint); }
+    .draft-saved {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: .62rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--ham);
+      padding: .12rem .4rem;
+      border: 1px solid color-mix(in srgb, var(--ham) 40%, transparent);
+      border-radius: 99px;
+      vertical-align: middle;
+    }
+    .draft-preview { margin-top: .5rem; }
+    .draft-preview > summary {
+      color: var(--ham);
+      text-transform: none;
+      letter-spacing: 0;
+      font-family: var(--mono);
+      font-size: .72rem;
+    }
+    .draft-body {
+      margin-top: .4rem;
+      padding: .65rem .8rem;
+      white-space: pre-wrap;
+      font-family: var(--sans);
+      font-size: .82rem;
+      line-height: 1.5;
+      color: var(--text);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-left: 2px solid var(--ham);
+      border-radius: var(--radius);
     }
     .received {
       font-family: var(--mono);

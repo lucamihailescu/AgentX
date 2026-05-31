@@ -3,6 +3,7 @@ import logging
 
 import httpx
 
+from .categories import CATEGORIES, normalize_category
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,34 @@ _SYSTEM_PROMPT = (
     '  - "reason": short string explaining the verdict.\n\n'
     'Example: {"spam": true, "confidence": 0.92, "reason": "promotional '
     'language and unknown sender"}'
+)
+
+# Appended to the system prompt when triage is enabled — asks for two extra
+# keys (`category`, `needs_reply`) in the same round-trip so categorization
+# costs no additional LLM call. Kept separate so disabling categorization
+# returns the prompt to its original, spam-only shape.
+_CATEGORIZE_ADDENDUM = (
+    "\n\nAlso include these TWO additional keys in the same JSON object:\n"
+    '  - "category": one of EXACTLY these values — '
+    + ", ".join(f'"{c}"' for c in CATEGORIES)
+    + ". Pick the single best fit; use \"Other\" when unsure.\n"
+    '  - "needs_reply": boolean — true only if this looks like a personal or '
+    "business message a human is expected to reply to (not newsletters, "
+    "receipts, notifications, or marketing).\n\n"
+    'Full example: {"spam": false, "confidence": 0.88, "reason": "personal '
+    'note from a colleague", "category": "Personal", "needs_reply": true}'
+)
+
+# Appended (after the categorize addendum) when action extraction is on.
+_ACTIONS_ADDENDUM = (
+    "\n\nIf — and only if — the email asks the recipient to DO something "
+    "(reply, pay, confirm, review, schedule, submit), also include:\n"
+    '  - "action": a short imperative summary (max ~10 words) of what is '
+    "being asked, or null if nothing is requested.\n"
+    '  - "due": the deadline as an ISO date (YYYY-MM-DD) if one is stated, '
+    "else null.\n"
+    "Omit both (or set them null) for newsletters, receipts, and "
+    "notifications that need no action."
 )
 
 # Keys we'll accept when the model picks a near-synonym instead of "spam".
@@ -60,8 +89,14 @@ def _build_prompt(
     *,
     ham_examples: list[dict] | None = None,
     spam_examples: list[dict] | None = None,
+    categorize: bool = False,
+    extract_actions: bool = False,
 ) -> str:
     parts: list[str] = [_SYSTEM_PROMPT]
+    if categorize:
+        parts.append(_CATEGORIZE_ADDENDUM)
+        if extract_actions:
+            parts.append(_ACTIONS_ADDENDUM)
     if ham_examples or spam_examples:
         parts.append(
             "\n\nUse these previously-classified examples from this user's "
@@ -133,6 +168,8 @@ async def classify(
     Pass `ham_examples` / `spam_examples` to inject few-shot context drawn
     from the user's prior verdicts.
     """
+    categorize = settings.categorize_enabled
+    extract_actions = categorize and settings.extract_actions_enabled
     payload = {
         "model": settings.ollama_model,
         "prompt": _build_prompt(
@@ -141,6 +178,8 @@ async def classify(
             message.get("preview"),
             ham_examples=ham_examples,
             spam_examples=spam_examples,
+            categorize=categorize,
+            extract_actions=extract_actions,
         ),
         "format": "json",
         "stream": False,
@@ -159,11 +198,15 @@ async def classify(
         raw_response = resp.json().get("response", "")
         verdict = json.loads(raw_response)
     except (httpx.HTTPError, ValueError, KeyError) as exc:
-        return {
+        out = {
             "spam": None,
             "confidence": None,
             "reason": f"classification failed: {exc}"[:200],
         }
+        if categorize:
+            out["category"] = None
+            out["needs_reply"] = None
+        return out
 
     spam_val = _extract_spam(verdict) if isinstance(verdict, dict) else None
     if spam_val is None:
@@ -177,8 +220,18 @@ async def classify(
             keys,
             raw_response[:200],
         )
-    return {
+    result = {
         "spam": spam_val,
         "confidence": _coerce_confidence(verdict.get("confidence")) if isinstance(verdict, dict) else None,
         "reason": verdict.get("reason") if isinstance(verdict, dict) else None,
     }
+    if categorize:
+        vd = verdict if isinstance(verdict, dict) else {}
+        result["category"] = normalize_category(vd.get("category"))
+        result["needs_reply"] = bool(_coerce_bool(vd.get("needs_reply")))
+        if extract_actions:
+            action = vd.get("action")
+            result["action"] = action.strip()[:160] if isinstance(action, str) and action.strip() else None
+            due = vd.get("due")
+            result["due"] = due.strip()[:32] if isinstance(due, str) and due.strip() and due.strip().lower() != "null" else None
+    return result

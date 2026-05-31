@@ -22,6 +22,33 @@ logger = logging.getLogger(__name__)
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 _PAGE_SIZE = 50
 
+# Headers the phishing heuristics care about (lowercased).
+_AUTH_HEADER_NAMES = frozenset(
+    {"reply-to", "return-path", "authentication-results", "received-spf"}
+)
+
+
+def _compose_from_header(from_obj: dict) -> str | None:
+    """Rebuild a raw `From:`-style value ("Name <addr>") from Graph's
+    structured emailAddress object, so the phishing layer can compare the
+    display name against the address."""
+    name = (from_obj or {}).get("name")
+    addr = (from_obj or {}).get("address")
+    if name and addr and name.strip().lower() != addr.strip().lower():
+        return f"{name} <{addr}>"
+    return addr or None
+
+
+def _select_auth_headers(headers: list[dict]) -> dict[str, str] | None:
+    """Pull the subset of internetMessageHeaders the phishing heuristics use."""
+    out: dict[str, str] = {}
+    for h in headers:
+        name = (h.get("name") or "").strip().lower()
+        if name in _AUTH_HEADER_NAMES and h.get("value"):
+            # Keep the first occurrence of each header.
+            out.setdefault(name, h["value"])
+    return out or None
+
 
 class MicrosoftProvider(MailboxProvider):
     NAME: ClassVar[str] = "microsoft"
@@ -154,7 +181,7 @@ class MicrosoftProvider(MailboxProvider):
         page_size = min(_PAGE_SIZE, limit)
         qs = [
             f"$top={page_size}",
-            "$select=id,subject,from,receivedDateTime,bodyPreview,internetMessageHeaders",
+            "$select=id,subject,from,receivedDateTime,bodyPreview,categories,internetMessageHeaders",
             "$orderby=receivedDateTime desc",
         ]
         if cursor_before:
@@ -175,18 +202,21 @@ class MicrosoftProvider(MailboxProvider):
                 )
             body = resp.json()
             for m in body.get("value", []):
-                unsub = find_unsubscribe(m.get("internetMessageHeaders") or [])
+                headers = m.get("internetMessageHeaders") or []
+                unsub = find_unsubscribe(headers)
+                from_obj = (m.get("from") or {}).get("emailAddress", {})
                 out.append(
                     Message(
                         id=m.get("id"),
                         subject=m.get("subject"),
-                        from_address=(m.get("from") or {})
-                            .get("emailAddress", {})
-                            .get("address"),
+                        from_address=from_obj.get("address"),
                         received=m.get("receivedDateTime"),
                         preview=m.get("bodyPreview"),
                         unsubscribe_url=unsub["url"] if unsub else None,
                         unsubscribe_one_click=unsub["one_click"] if unsub else False,
+                        categories=m.get("categories") or None,
+                        from_header=_compose_from_header(from_obj),
+                        auth_headers=_select_auth_headers(headers),
                     )
                 )
                 if len(out) >= limit:
@@ -206,6 +236,85 @@ class MicrosoftProvider(MailboxProvider):
             raise AuthError(
                 f"Graph DELETE returned {resp.status_code}: {resp.text[:200]}"
             )
+
+    @classmethod
+    async def apply_labels(
+        cls,
+        user_id: str,
+        message_id: str,
+        add_labels: list[str],
+        *,
+        existing_categories: list[str] | None = None,
+    ) -> None:
+        """Merge `add_labels` into the message's Outlook categories.
+
+        Graph's PATCH replaces the whole `categories` array, so we union with
+        the categories captured at fetch time to avoid clobbering any the user
+        set themselves. No-op when every label is already present.
+        """
+        if not add_labels:
+            return
+        existing = list(existing_categories or [])
+        existing_lower = {c.strip().lower() for c in existing}
+        merged = list(existing)
+        for label in add_labels:
+            if label.strip().lower() not in existing_lower:
+                merged.append(label)
+                existing_lower.add(label.strip().lower())
+        if len(merged) == len(existing):
+            return  # nothing new to add
+        token = await cls.acquire_access_token(user_id)
+        resp = await cls.request_with_retry(
+            "PATCH",
+            f"{_GRAPH_BASE}/me/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"categories": merged},
+        )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Graph PATCH (categories) returned {resp.status_code}: {resp.text[:200]}"
+            )
+
+    @classmethod
+    async def create_draft(
+        cls,
+        user_id: str,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        in_reply_to_id: str | None = None,
+    ) -> str:
+        """Save a reply draft via Graph. With `in_reply_to_id`, use
+        `createReply` so the draft threads onto the original conversation and
+        quotes it; our generated text goes in as the reply `comment`. Without
+        it, create a standalone draft. Never sent."""
+        token = await cls.acquire_access_token(user_id)
+        headers = {"Authorization": f"Bearer {token}"}
+        if in_reply_to_id:
+            resp = await cls.request_with_retry(
+                "POST",
+                f"{_GRAPH_BASE}/me/messages/{in_reply_to_id}/createReply",
+                headers=headers,
+                json={"comment": body},
+            )
+        else:
+            resp = await cls.request_with_retry(
+                "POST",
+                f"{_GRAPH_BASE}/me/messages",
+                headers=headers,
+                json={
+                    "subject": subject,
+                    "body": {"contentType": "Text", "content": body},
+                    "toRecipients": [{"emailAddress": {"address": to}}],
+                    "isDraft": True,
+                },
+            )
+        if resp.status_code >= 400:
+            raise AuthError(
+                f"Graph create draft returned {resp.status_code}: {resp.text[:200]}"
+            )
+        return (resp.json() or {}).get("id") or ""
 
     @classmethod
     async def fetch_raw(cls, user_id: str, message_id: str) -> bytes:
