@@ -42,6 +42,21 @@ _init_lock = asyncio.Lock()
 _unavailable = False  # sticky after a hard init failure
 
 
+def _search_chroma_path() -> str:
+    """Dedicated Chroma directory for the message index — a sibling of mem0's
+    store, NOT the same path.
+
+    ChromaDB allows only one client instance per path within a process, and
+    rejects a second one whose Settings differ ("instance already exists ...
+    with different settings"). mem0 (chat memory) and this search index are
+    two independent clients, so they must live at different paths or one will
+    block the other's init. Sits under the same /data bind mount, so it
+    persists across `docker compose down`.
+    """
+    base = settings.chroma_path.rstrip("/\\")
+    return f"{base}_search"
+
+
 async def _get_collection():
     """Lazy Chroma collection init. Returns None on failure (caller no-ops)."""
     global _collection, _unavailable
@@ -54,11 +69,18 @@ async def _get_collection():
             return _collection
         if _unavailable:
             return None
+        path = _search_chroma_path()
         try:
             import chromadb  # noqa: PLC0415 — defer heavy import
+            from chromadb.config import Settings  # noqa: PLC0415
 
             def _open():
-                client = chromadb.PersistentClient(path=settings.chroma_path)
+                client = chromadb.PersistentClient(
+                    path=path,
+                    # Telemetry is off because the bundled posthog client
+                    # version raises on capture(); it only spams the logs.
+                    settings=Settings(anonymized_telemetry=False),
+                )
                 # We always pass embeddings explicitly, so no embedding
                 # function is needed (avoids Chroma loading a default model).
                 return client.get_or_create_collection(
@@ -68,7 +90,7 @@ async def _get_collection():
             _collection = await asyncio.to_thread(_open)
             logger.info(
                 "search index ready (chroma path=%s, collection=%s)",
-                settings.chroma_path, _COLLECTION,
+                path, _COLLECTION,
             )
         except Exception as exc:
             logger.warning(
