@@ -5,7 +5,9 @@ repeatedly (delete + unsubscribe via the UI) and surfaces them as candidates
 for an `address`-level deny rule. Auto-deletes (blocklist / existing deny
 rule) don't count toward the signal — only user-initiated actions do.
 
-Senders that already have any rule, or have been dismissed, are excluded.
+Senders already covered by any rule — an exact `address` rule, a parent
+`domain` rule, or an `address_contains` rule — or that have been dismissed,
+are excluded.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from datetime import datetime, timezone
 import aiosqlite
 
 from .config import settings
+from .rules import load_rule_index, lookup as lookup_rule
 
 
 def _now() -> str:
@@ -28,7 +31,15 @@ async def list_block_suggestions(
     limit: int | None = None,
 ) -> list[dict]:
     """Return the top senders the user keeps deleting/unsubscribing from
-    that don't yet have a rule and haven't been dismissed."""
+    that aren't already covered by a rule and haven't been dismissed.
+
+    "Already covered" means the same matching `rules.lookup` applies at
+    classification time — an exact `address` rule, a `domain` rule on the
+    sender's domain *or any parent domain*, or an `address_contains` rule.
+    Suggesting a block for a sender a broader rule already handles (e.g.
+    `suno@creators.suno.com` when a `suno.com` domain deny exists) only bloats
+    the rule list, so those are filtered out here rather than in SQL.
+    """
     threshold = threshold if threshold is not None else settings.suggest_block_threshold
     limit = limit if limit is not None else settings.suggest_max_items
     async with aiosqlite.connect(settings.db_path) as db:
@@ -40,12 +51,6 @@ async def list_block_suggestions(
                  AND s.target_type = 'address'
                  AND (s.deleted + s.unsubscribed) >= ?
                  AND NOT EXISTS (
-                   SELECT 1 FROM sender_rules r
-                   WHERE r.user_id = s.user_id
-                     AND r.target_type = 'address'
-                     AND r.target = s.target
-                 )
-                 AND NOT EXISTS (
                    SELECT 1 FROM suggestion_dismissals d
                    WHERE d.user_id = s.user_id
                      AND d.target_type = 'address'
@@ -53,12 +58,24 @@ async def list_block_suggestions(
                      AND d.suggestion_kind = 'block'
                  )
                ORDER BY (s.deleted + s.unsubscribed) DESC,
-                        s.deleted DESC
-               LIMIT ?""",
-            (user_id, threshold, limit),
+                        s.deleted DESC""",
+            (user_id, threshold),
         )
         rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+
+    # Filter out any sender already covered by an existing rule (allow OR deny,
+    # at any tier), using the same lookup classification uses. We over-fetch
+    # candidates above and apply `limit` after filtering so a covered sender
+    # near the top doesn't crowd out a genuinely un-ruled one.
+    rule_index = await load_rule_index(user_id)
+    out: list[dict] = []
+    for r in rows:
+        if lookup_rule(rule_index, r["target"]) is not None:
+            continue
+        out.append(dict(r))
+        if len(out) >= limit:
+            break
+    return out
 
 
 # Shared / freemail / per-recipient relay domains: every user has unrelated
