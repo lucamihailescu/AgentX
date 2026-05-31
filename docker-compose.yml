@@ -62,7 +62,11 @@ services:
       # Semantic mailbox search
       AGENT_SEARCH_ENABLED: ${SEARCH_ENABLED:-true}
       AGENT_SEARCH_TOP_K: ${SEARCH_TOP_K:-20}
+      # RSPAMD_URL = scanner (11333); learn goes to the controller (11334),
+      # derived from RSPAMD_URL unless RSPAMD_CONTROLLER_URL is set.
       AGENT_RSPAMD_URL: ${RSPAMD_URL:-http://rspamd:11333}
+      AGENT_RSPAMD_CONTROLLER_URL: ${RSPAMD_CONTROLLER_URL:-http://rspamd:11334}
+      AGENT_RSPAMD_PASSWORD: ${RSPAMD_PASSWORD:-}
       AGENT_RSPAMD_WEIGHT: ${RSPAMD_WEIGHT:-0.6}
       AGENT_RSPAMD_TIMEOUT_SECONDS: ${RSPAMD_TIMEOUT_SECONDS:-3.0}
       AGENT_PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
@@ -79,7 +83,8 @@ services:
     # Per-user Bayes + Redis backend wired via mounted local.d overrides.
     # Ports kept internal — only the agent container talks to rspamd.
     expose:
-      - "11333"   # normal worker (checkv2, learnspam, learnham)
+      - "11333"   # normal worker — /checkv2 message scanning
+      - "11334"   # controller worker — /learnspam, /learnham, web UI
     volumes:
       - ./rspamd/local.d:/etc/rspamd/local.d:ro
       - ./data/rspamd:/var/lib/rspamd
