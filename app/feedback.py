@@ -6,6 +6,8 @@ left alone don't teach the model anything (they could be unread, ignored,
 or about-to-be-deleted). The signals we treat as authoritative:
 
 - ``rule_applied == "allow"``        → ham
+- ``kept``                           → ham (user marked a flagged message
+                                       "not spam" — an explicit correction)
 - ``rule_applied == "deny"``         → spam
 - ``auto_deleted``                   → spam (matched a blocklist or deny rule
                                        the user installed; same intent)
@@ -29,6 +31,8 @@ def _label_for(m: dict) -> str | None:
     if m.get("rule_applied") == "deny":
         return "spam"
     if m.get("rule_applied") == "allow":
+        return "ham"
+    if m.get("kept"):
         return "ham"
     if m.get("auto_deleted"):
         return "spam"

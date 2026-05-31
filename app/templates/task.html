@@ -184,6 +184,7 @@
         <div id="bulk-bar" class="bulk-bar" hidden>
           <span class="bulk-count"><strong id="bulk-count">0</strong> selected</span>
           <div class="bulk-actions">
+            <button type="button" class="small" data-bulk-action="keep">not spam</button>
             <button type="button" class="small" data-bulk-action="allow">allow sender</button>
             <button type="button" class="small danger" data-bulk-action="deny">block sender</button>
             <button type="button" class="small" data-bulk-action="unsubscribe">unsub</button>
@@ -277,6 +278,8 @@
                     <span class="pill spam">denied</span>
                   {% elif m.spam == true %}
                     <span class="pill spam">spam</span>
+                  {% elif m.kept %}
+                    <span class="pill ham">not spam</span>
                   {% elif m.spam == false %}
                     <span class="pill ham">ok</span>
                   {% else %}
@@ -347,7 +350,17 @@
                   {% if m.draft_created %}
                     <span class="draft-saved" title="reply draft saved to your mailbox">draft ✓</span>
                   {% endif %}
+                  {% if m.kept %}
+                    <span class="kept-saved" title="marked not spam — trained the filter">not spam ✓</span>
+                  {% endif %}
                   {% if (m.spam == true or m.spam is none) and not m.deleted and not m.auto_deleted and not m.rule_applied and m.id and m.from %}
+                    <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/keep"
+                          method="post" class="inline"
+                          data-confirm="Mark this message as not spam? Trains the filter; does not allowlist {{ m.from }}."
+                          data-confirm-action="Not spam">
+                      {% include "_csrf.html" %}
+                      <button type="submit" class="rule-btn keep" title="Mark not spam (trains the filter; does not allowlist the sender)">not&nbsp;spam</button>
+                    </form>
                     <form action="/ui/tasks/{{ task.task_id }}/messages/{{ m.id }}/rule/allow"
                           method="post" class="inline"
                           data-confirm="Always allow {{ m.from }}?"
@@ -426,6 +439,7 @@
         'unsubscribe-and-delete': ['Unsubscribe and delete', 'Unsub + delete'],
         'allow': ['Allow senders of', 'Allow'],
         'deny': ['Block senders of, then delete,', 'Block + delete'],
+        'keep': ['Mark not spam', 'Not spam'],
       };
 
       document.querySelectorAll('[data-bulk-action]').forEach(btn => {
@@ -755,7 +769,7 @@
       color: var(--accent);
     }
     .rule-btn.draft:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-tint); }
-    .draft-saved {
+    .draft-saved, .kept-saved {
       display: inline-block;
       font-family: var(--mono);
       font-size: .62rem;
@@ -818,6 +832,15 @@
     .rule-btn:hover { color: var(--text); }
     .rule-btn.allow:hover { color: var(--ham); border-color: var(--ham); background: var(--ham-tint); }
     .rule-btn.deny:hover { color: var(--spam); border-color: var(--spam); background: var(--spam-tint); }
+    /* "not spam" is a text label, not a 26px icon — let it size to content. */
+    .rule-btn.keep {
+      width: auto;
+      padding: 0 .4rem;
+      font-size: .62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .rule-btn.keep:hover { color: var(--ham); border-color: var(--ham); background: var(--ham-tint); }
 
     .next-page {
       margin: 1rem 0 1.5rem;

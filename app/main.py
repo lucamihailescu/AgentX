@@ -477,6 +477,27 @@ async def ui_delete_message(task_id: str, message_id: str, request: Request):
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
+@app.post("/ui/tasks/{task_id}/messages/{message_id}/keep")
+async def ui_keep_message(task_id: str, message_id: str, request: Request):
+    """Mark a spam/unknown message as 'not spam' — a per-message correction of
+    a model false positive. Unlike the allow rule (which allowlists the sender
+    forever), this only reclassifies this one message and trains the spam
+    filter's ham side. No rule is created and the message is left in place."""
+    user_id = _require_user(request)
+    task = await _load_task(user_id, task_id)
+    target = _find_message(task, message_id)
+    if target.get("deleted") or target.get("auto_deleted"):
+        return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+    target["kept"] = True
+    target["kept_at"] = datetime.now(timezone.utc).isoformat()
+    target["spam"] = False
+    target["reason"] = "marked not spam"
+    await _save_result(task_id, task["result"])
+    # Train the ham side — the highest-precision user-taste ham signal.
+    rspamd_client.fire_learn(target, user_id, "ham")
+    return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
+
+
 @app.post("/ui/tasks/{task_id}/messages/{message_id}/unsubscribe")
 async def ui_unsubscribe_message(task_id: str, message_id: str, request: Request):
     user_id = _require_user(request)
@@ -497,6 +518,7 @@ _BULK_ACTIONS = {
     "unsubscribe-and-delete",
     "allow",
     "deny",
+    "keep",
 }
 
 
@@ -523,6 +545,18 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
     do_unsub = action in {"unsubscribe", "unsubscribe-and-delete"}
     do_delete = action in {"delete", "unsubscribe-and-delete", "deny"}
     do_rule = action in {"allow", "deny"}
+    do_keep = action == "keep"
+
+    if do_keep:
+        # Per-message "not spam" correction — reclassify in place, no rule,
+        # no provider call. Trains ham below.
+        for target in targets:
+            if target.get("deleted") or target.get("auto_deleted"):
+                continue
+            target["kept"] = True
+            target["kept_at"] = datetime.now(timezone.utc).isoformat()
+            target["spam"] = False
+            target["reason"] = "marked not spam"
 
     if do_rule:
         senders_for_rule: set[str] = set()
@@ -592,16 +626,21 @@ async def ui_bulk_action(task_id: str, action: str, request: Request):
     await _save_result(task_id, task["result"])
     for sender, d, u in bumps:
         await sender_stats.bump_action(user_id, sender, deleted=d, unsubscribed=u)
-    # Train Rspamd on every successfully-actioned message. Allow/deny bulk
-    # variants are labeled by intent; delete/unsub are always "spam".
-    learn_label = "ham" if action == "allow" else "spam"
-    if do_rule or do_delete or do_unsub:
+    # Train Rspamd on every successfully-actioned message. Allow + keep are
+    # "ham"; delete/unsub/deny are "spam".
+    if do_keep:
         for target in targets:
-            if (
-                target.get("deleted") or target.get("unsubscribed")
-                or target.get("rule_applied") == "allow"
-            ):
-                rspamd_client.fire_learn(target, user_id, learn_label)
+            if target.get("kept"):
+                rspamd_client.fire_learn(target, user_id, "ham")
+    else:
+        learn_label = "ham" if action == "allow" else "spam"
+        if do_rule or do_delete or do_unsub:
+            for target in targets:
+                if (
+                    target.get("deleted") or target.get("unsubscribed")
+                    or target.get("rule_applied") == "allow"
+                ):
+                    rspamd_client.fire_learn(target, user_id, learn_label)
     return RedirectResponse(f"/ui/tasks/{task_id}", status_code=303)
 
 
