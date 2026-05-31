@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 _COLLECTION = "agentx_messages"
 
+# Embed in chunks so one transient Ollama hiccup only costs that chunk (the
+# rest still index) and peak request size stays bounded on memory-constrained
+# hosts that are also juggling the classifier + chat models.
+_EMBED_CHUNK = 64
+_EMBED_ATTEMPTS = 3
+
 _collection: Any = None
 _init_lock = asyncio.Lock()
 _unavailable = False  # sticky after a hard init failure
@@ -87,17 +93,48 @@ async def _embed(texts: list[str]) -> list[list[float]] | None:
     """Batch-embed via Ollama's /api/embed. Returns None on failure."""
     if not texts:
         return []
-    try:
-        async with httpx.AsyncClient(base_url=settings.ollama_url) as client:
-            resp = await client.post(
-                "/api/embed",
-                json={"model": settings.embed_model, "input": texts},
-                timeout=settings.ollama_timeout_seconds,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("embed call failed: %s", exc)
+    data: dict | None = None
+    async with httpx.AsyncClient(base_url=settings.ollama_url) as client:
+        for attempt in range(1, _EMBED_ATTEMPTS + 1):
+            try:
+                resp = await client.post(
+                    "/api/embed",
+                    json={"model": settings.embed_model, "input": texts},
+                    timeout=settings.ollama_timeout_seconds,
+                )
+            except httpx.TransportError as exc:
+                # Connect/read error — transient; back off and retry.
+                if attempt == _EMBED_ATTEMPTS:
+                    logger.warning("embed call failed (transport): %s", exc)
+                    return None
+                await asyncio.sleep(0.5 * attempt)
+                continue
+            if resp.status_code >= 500:
+                # Ollama 5xx is usually transient (model load / memory
+                # pressure while it juggles classifier + embed models).
+                if attempt == _EMBED_ATTEMPTS:
+                    logger.warning(
+                        "embed call failed: %s - Ollama said: %s",
+                        resp.status_code, resp.text[:200],
+                    )
+                    return None
+                await asyncio.sleep(0.5 * attempt)
+                continue
+            if resp.status_code >= 400:
+                # 4xx (e.g. model not found) won't fix itself — don't retry.
+                logger.warning(
+                    "embed call rejected: %s - Ollama said: %s. "
+                    "Is AGENT_EMBED_MODEL (%s) pulled?",
+                    resp.status_code, resp.text[:200], settings.embed_model,
+                )
+                return None
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                logger.warning("embed response not JSON: %s", exc)
+                return None
+            break
+    if data is None:
         return None
     embeddings = data.get("embeddings")
     if embeddings is None and "embedding" in data:  # single-vector shape
@@ -153,23 +190,40 @@ async def index_messages(
     if not ids:
         return 0
 
-    embeddings = await _embed(docs)
-    if embeddings is None:
-        return 0
+    # Embed + upsert in chunks: a transient embed failure costs only its
+    # chunk, and the next audit re-upserts everything anyway (idempotent).
+    upserted = 0
+    failed_chunks = 0
+    for start in range(0, len(ids), _EMBED_CHUNK):
+        end = start + _EMBED_CHUNK
+        chunk_docs = docs[start:end]
+        embeddings = await _embed(chunk_docs)
+        if embeddings is None:
+            failed_chunks += 1
+            continue
+        try:
+            await asyncio.to_thread(
+                collection.upsert,
+                ids=ids[start:end],
+                embeddings=embeddings,
+                documents=chunk_docs,
+                metadatas=metas[start:end],
+            )
+        except Exception as exc:
+            logger.warning("search index upsert failed: %s", exc)
+            failed_chunks += 1
+            continue
+        upserted += len(chunk_docs)
 
-    try:
-        await asyncio.to_thread(
-            collection.upsert,
-            ids=ids,
-            embeddings=embeddings,
-            documents=docs,
-            metadatas=metas,
+    if failed_chunks:
+        logger.warning(
+            "search index: %d message(s) upserted, %d chunk(s) skipped "
+            "(transient embed/upsert failures; next audit retries)",
+            upserted, failed_chunks,
         )
-    except Exception as exc:
-        logger.warning("search index upsert failed: %s", exc)
-        return 0
-    logger.info("search index: upserted %d message(s)", len(ids))
-    return len(ids)
+    elif upserted:
+        logger.info("search index: upserted %d message(s)", upserted)
+    return upserted
 
 
 async def search(user_id: str, query: str, *, limit: int = 20) -> list[dict]:

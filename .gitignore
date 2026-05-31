@@ -50,5 +50,8 @@ Thumbs.db
 *.log
 logs/
 
+# Runtime PID files (e.g. .codegraph/daemon.pid)
+*.pid
+
 # Claude Code local state (CLAUDE.md, if added, IS tracked)
 .claude/settings.local.json
