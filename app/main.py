@@ -65,6 +65,10 @@ def render_citations(text: str) -> Markup:
 
 templates.env.filters["citations"] = render_citations
 
+# Build version is build-time constant, exposed to every template (footer)
+# without each handler having to thread it through its context dict.
+templates.env.globals["build_version"] = settings.build_version
+
 
 class CreateTaskResponse(BaseModel):
     task_id: str

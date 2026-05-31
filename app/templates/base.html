@@ -652,6 +652,20 @@
     }
     .modal-actions button { padding: .55rem 1rem; }
     .modal-actions .primary { min-width: 110px; }
+
+    /* ───────── footer ───────── */
+    footer.app-footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+      font-family: var(--mono);
+      font-size: .7rem;
+      letter-spacing: 0.04em;
+      color: var(--text-faint);
+    }
+    footer.app-footer .build-version { color: var(--text-muted); }
   </style>
 </head>
 <body>
@@ -680,6 +694,10 @@
       {% endif %}
     </nav>
     {% block body %}{% endblock %}
+
+    <footer class="app-footer">
+      <span>agentx · build <span class="build-version">{{ build_version }}</span></span>
+    </footer>
   </div>
 
   <dialog id="confirm-dialog" class="modal" aria-labelledby="confirm-title">
