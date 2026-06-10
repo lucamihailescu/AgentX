@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
+import nh3
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -429,6 +430,23 @@ async def _do_unsubscribe(target: dict) -> None:
     target["unsubscribed_at"] = datetime.now(timezone.utc).isoformat()
 
 
+# Inline `style` (CSS is sanitised by nh3) and `class` are allowed on every tag
+# so HTML email keeps its layout; nh3's defaults already drop <script>, inline
+# event handlers, and javascript: URLs.
+_EMAIL_HTML_ATTRIBUTES = {**nh3.ALLOWED_ATTRIBUTES, "*": {"style", "class"}}
+
+
+def _sanitize_email_html(html: str | None) -> str | None:
+    """Strip active content from untrusted email HTML before the template
+    renders it with `| safe`. This is defence-in-depth behind the rendering
+    surface's two existing layers — the empty-`sandbox` iframe (no scripting at
+    all) and the strict `default-src 'none'` CSP — and additionally protects the
+    case where `/body` is opened directly rather than inside that iframe."""
+    if not html:
+        return None
+    return nh3.clean(html, attributes=_EMAIL_HTML_ATTRIBUTES)
+
+
 @app.get("/ui/tasks/{task_id}/messages/{message_id}/body", response_class=HTMLResponse)
 async def ui_message_body(task_id: str, message_id: str, request: Request):
     """Render a single message's body in a self-contained HTML doc, designed
@@ -449,7 +467,7 @@ async def ui_message_body(task_id: str, message_id: str, request: Request):
             "subject": body.get("subject"),
             "from_addr": body.get("from"),
             "received": body.get("received"),
-            "html_body": body.get("html"),
+            "html_body": _sanitize_email_html(body.get("html")),
             "text_body": body.get("text"),
         },
         headers={
