@@ -11,5 +11,5 @@ python-multipart==0.0.30
 tzdata==2026.2
 cryptography==48.0.0
 mem0ai==0.1.116
-chromadb==0.5.23
+chromadb==1.5.9
 ollama==0.6.2
