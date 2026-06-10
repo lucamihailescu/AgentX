@@ -81,6 +81,17 @@ services:
       # does NOT touch the SQLite file or ChromaDB store. Both live in
       # ./data/ on the host (./data/tasks.db and ./data/chroma/).
       - ./data:/data
+    # Gate dependents (cloudflared) on the app actually serving, not just the
+    # container starting. Boot is slow (loads ChromaDB, warms embeddings,
+    # categorizes), so start_period covers that window — until then the tunnel
+    # would proxy to a port nothing is listening on and return 502 Bad Gateway.
+    # No curl/wget in the image, so probe with the bundled python3.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
     depends_on:
       - rspamd
 
@@ -139,7 +150,10 @@ services:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
     command: ["tunnel", "--no-autoupdate", "run", "--token", "${TUNNEL_TOKEN:-}"]
+    # Wait for the agent to pass its healthcheck before connecting to the edge,
+    # otherwise requests during the agent's warm-up get 502 Bad Gateway.
     depends_on:
-      - agent
+      agent:
+        condition: service_healthy
     profiles:
       - tunnel
